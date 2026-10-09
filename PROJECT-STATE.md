@@ -1206,3 +1206,48 @@ SHA-256 `02e143e8…f7c2`，可直接覆盖安装）+ `dist/MyTV-Legacy-v1.2-deb
 + `-debug.apk`（12.8 MB）+ `dist/v1.6-报告.md` + `dist/evidence/V16-*.png`
 + 仓库文档 `README.md` / `LICENSE` / `THIRD-PARTY.md` / `update/version.json` / `.gitignore`
 体积变化：6.76 MB → 10.3 MB（+3.5 MB，Conscrypt 的 4 个 ABI 原生库；如需瘦身可只留 arm 两档）。
+
+---
+
+## GitHub 上传（2026-10-09 夜间，用户提供了 Classic PAT）
+
+### 结果
+- 仓库：**https://github.com/nid12345/MyTV4.4** —— public，默认分支 `main`，
+  描述「MyTV 4.4 —— 面向 Android 4.4（API 19）老机顶盒的 IPTV 播放器移植版」。
+- 提交：
+  - `44eeece4e3ae527b73ee2a55ac702449cecbd5a4` —— 初始提交，169 个文件 / 2.17 MB
+    （递归 tree 校验：blob 数 169，`truncated=false`，字节数与本地一致）
+  - `f62452f231403b7e4b9c54cc86940cbc5504fd60` —— README 里升级清单示例由占位符
+    `<owner>/<repo>` 改为真实地址
+- Release **v1.6**（id 407945823）：`https://github.com/nid12345/MyTV4.4/releases/tag/v1.6`
+  - `MyTV4.4-v1.6-legacy11.apk` —— 10,289,897 B，MD5 `56889dcb39d58e582daf4a5d52c85bf6`，state=uploaded
+  - `MyTV4.4-v1.6-legacy11-debug.apk` —— 12,879,953 B，MD5 `2e0896219ee494c3226aa16973bb985e`，state=uploaded
+
+### 端到端验证（都实测过，不是"应该能通"）
+| 项 | 结果 |
+|---|---|
+| `raw.githubusercontent.com/nid12345/MyTV4.4/main/update/version.json` | **200**，`versionCode=11`，url / size / md5 与本地产物一致 |
+| 安装包下载链接（跟随重定向） | **200**，落到 `release-assets.githubusercontent.com` |
+| Range 请求首 2 KB | **206**，头部为 `PK`（合法 APK） |
+| 敏感文件隔离 | 仓库里**没有** `keystore/`、`keystore.properties`、`local.properties`、`dist/`、`build/`、`.DS_Store`、`*.apk`；只保留 `keystore.properties.example` 模板 |
+
+### 本轮踩坑（复用价值高）
+1. **Python `urllib` 直连 `api.github.com` 会 `RemoteDisconnected`** —— 但请求**已经到达 GitHub 并生效**
+   （建仓库成功了，只是响应回程被切断）。于是出现「GET 说不存在 → POST 说 name already exists」的矛盾。
+   → 传输层统一改用 **curl + `--noproxy '*'`**（已验证可用），不要再手写 urllib。
+2. **`nohup ... &` 在这种会话里不存活**（日志一直是空的）。长任务要用受管后台任务直接跑，
+   不要自己 `nohup + &`。
+3. **前台跑长脚本会被环境信号杀掉（exit 137）**，同样走后台。
+4. **上传 Release 附件在 ~8.5 MB / 10.3 MB 处 `Connection reset by peer`**：
+   根因是 curl 对大 body 默认发 `Expect: 100-continue`，这条链路处理不好。
+   加 **`-H "Expect:"`** 后一次成功（58 s / 64 s）。
+   失败的附件会留下 `state=starter` 的僵尸记录（size 显示完整但没提交），
+   必须 `DELETE /releases/assets/{id}` 后再传，否则下载链接是坏的。
+5. 建仓库时带 `license_template` 字段返回 422；诊断要看 `errors[].message`
+   （本次是 `name already exists on this account`，即第 1 条造成的假象）。
+
+### 遗留（需用户手动处理）
+- 排查过程中建了一个空仓库 **`nid12345/MyTV4.4-test`**，删除接口返回
+  `403 Must have admin rights to Repository`（PAT 有 `repo` scope 但仍被拒，疑似账号级删除限制）。
+  需到 `https://github.com/nid12345/MyTV4.4-test/settings` 最底部手动 **Delete this repository**。
+- 可选瘦身：只保留 `armeabi-v7a` + `arm64-v8a` 可省约 4.7 MB。
