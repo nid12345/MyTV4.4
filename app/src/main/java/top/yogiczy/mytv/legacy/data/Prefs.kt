@@ -730,6 +730,19 @@ object Prefs {
         sp(ctx).edit().putBoolean("UPDATE_FORCE_REMIND_ENABLE", value).commit()
     }
 
+    /**
+     * 《使用须知》是否已同意（`APP_AGREEMENT_AGREED`，默认 false）。
+     *
+     * 对应原版 `Configs.appAgreementAgreed`：首次启动先弹全屏《使用须知》，
+     * 点「已阅读并同意」后落库，之后不再弹。
+     */
+    fun appAgreementAgreed(ctx: Context): Boolean =
+        sp(ctx).getBoolean("APP_AGREEMENT_AGREED", false)
+
+    fun setAppAgreementAgreed(ctx: Context, value: Boolean) {
+        sp(ctx).edit().putBoolean("APP_AGREEMENT_AGREED", value).commit()
+    }
+
     /** 下载线路（`UPDATE_DOWNLOAD_LINE`，默认 "auto"）。 */
     fun updateDownloadLine(ctx: Context): String =
         getString(ctx, "UPDATE_DOWNLOAD_LINE").ifBlank { "auto" }

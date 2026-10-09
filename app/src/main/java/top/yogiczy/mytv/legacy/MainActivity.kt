@@ -58,6 +58,7 @@ import top.yogiczy.mytv.legacy.player.DisplayMode
 import top.yogiczy.mytv.legacy.player.PlayerController
 import top.yogiczy.mytv.legacy.ui.ChannelCardView
 import top.yogiczy.mytv.legacy.ui.ChannelInfoView
+import top.yogiczy.mytv.legacy.ui.AgreementView
 import top.yogiczy.mytv.legacy.ui.ChannelLogoStore
 import top.yogiczy.mytv.legacy.ui.DatetimeView
 import top.yogiczy.mytv.legacy.ui.DlnaCastView
@@ -114,6 +115,18 @@ class MainActivity : AppCompatActivity() {
          * 对齐原版 `Constants.UI_TEMP_CHANNEL_SCREEN_SHOW_DURATION = 1500L`（1.5 秒）。
          */
         private const val TEMP_CHANNEL_SCREEN_SHOW_MS = 1_500L
+
+        /**
+         * v1.7：换台/切线路后信息框的**兜底**显示时长 ——
+         * 画面迟迟出不来时最多挂这么久就收（正常路径是"画面出来后 2 秒"收）。
+         */
+        private const val TEMP_INFO_MAX_SHOW_MS = 12_000L
+
+        /** v1.7：画面开始播放（拿到视频分辨率）后信息框再保留的时长。 */
+        private const val READY_HIDE_AFTER_MS = 2_000L
+
+        /** v1.7：滑动手势的最短主轴位移（像素），太短的滑动不当作换台/切线路。 */
+        private const val SWIPE_MIN_PX = 90f
 
         /**
          * 「再按一次退出」的确认窗口（毫秒）。
@@ -249,14 +262,27 @@ class MainActivity : AppCompatActivity() {
     private val tempChannelHide = Runnable {
         tempChannelVisible = false
         refreshTopRight()
-        refreshChannelInfoBlock()   // 问题 3：1.5 秒后收起左下角信息块
+        refreshChannelInfoBlock()   // 问题 3：收起左下角信息块
     }
 
-    /** 问题 3：换台 / 换线路后显示 1.5 秒的左下角信息块。 */
+    /**
+     * v1.7（用户要求）：信息框**显示到画面开始播放后 2 秒**再自动隐藏。
+     *
+     * 之前是换台后固定 1.5 秒就收（画面常常还没出来），现在改为：
+     * 换台/切线路时显示 → 等画面真的出来（onVideoSize）再挂 2 秒倒计时；
+     * 如果直播一直出不了画面，最多挂 [TEMP_INFO_MAX_SHOW_MS] 兜底收起。
+     */
+    private val tempInfoMaxShow = Runnable {
+        UiLog.i("界面", "信息块兜底收起（画面迟迟未出）")
+        handler.post(tempChannelHide)
+    }
+
+    /** 问题 3：换台 / 换线路后显示左下角信息块（收起时机见 [tempInfoMaxShow]）。 */
     private fun showTempChannelInfo() {
         tempChannelVisible = true
         handler.removeCallbacks(tempChannelHide)
-        handler.postDelayed(tempChannelHide, TEMP_CHANNEL_SCREEN_SHOW_MS)
+        handler.removeCallbacks(tempInfoMaxShow)
+        handler.postDelayed(tempInfoMaxShow, TEMP_INFO_MAX_SHOW_MS)
         refreshTopRight()
         refreshChannelInfoBlock()
     }
@@ -317,11 +343,24 @@ class MainActivity : AppCompatActivity() {
                 tagSpeed.text = "${player.speedKBps}KB/s"
                 updateBottomProgress()
             }
-            // 问题 3/4：信息块可见时每秒刷新（网速 / 进度都是每秒变的）
+            handler.postDelayed(this, 1000L)
+        }
+    }
+
+    /**
+     * v1.7（用户要求"网速要实时"）：信息块可见期间每 500ms 刷新一次 ——
+     * [NetMeter] 的读数是真实下载速率，刷新越勤数字越"活"。
+     * （时钟等其余 UI 仍走 1 秒的 [clockTick]。）
+     */
+    private val speedTick = object : Runnable {
+        override fun run() {
             val infoVisible = (::tempInfoBar.isInitialized && tempInfoBar.visibility == View.VISIBLE) ||
                 (::quickOp.isInitialized && quickOp.isOpen)
-            if (infoVisible) refreshChannelInfoBlock()
-            handler.postDelayed(this, 1000L)
+            if (infoVisible && ::player.isInitialized) {
+                if (::tagSpeed.isInitialized) tagSpeed.text = "${player.speedKBps}KB/s"
+                refreshChannelInfoBlock()
+            }
+            handler.postDelayed(this, 500L)
         }
     }
 
@@ -375,10 +414,12 @@ class MainActivity : AppCompatActivity() {
         player.attach(surface)
         player.onVideoSize = { w, h ->
             bottomTagsUpdate("${w}×${h}")
-            // 原版：视频分辨率一变（画面出来了）就撤掉临时频道界面
+            // v1.7（用户要求）：信息框显示到「画面开始播放后 2 秒」再自动隐藏，
+            // 期间网速实时刷新（见 speedTick）。之前是画面一出来立刻撤。
             if (tempChannelVisible) {
                 handler.removeCallbacks(tempChannelHide)
-                tempChannelVisible = false
+                handler.removeCallbacks(tempInfoMaxShow)
+                handler.postDelayed(tempChannelHide, READY_HIDE_AFTER_MS)
                 refreshTopRight()
             }
         }
@@ -393,13 +434,19 @@ class MainActivity : AppCompatActivity() {
         UiLog.i("界面", "密度缩放：${Density.describe(this)}")
 
         handler.post(clockTick)
+        handler.post(speedTick)   // v1.7：信息块可见期间的实时网速刷新
+        // v1.7（用户要求）：首次安装先弹《使用须知》（全屏覆盖层，照搬原版 1.7 文案与样式）。
+        // 放在 loadSource 之后：底层继续加载，同意后直接就是可播状态。
+        if (!Prefs.appAgreementAgreed(this)) showAgreementGate()
         loadSource(Prefs.currentSourceUrl(this))
         refreshTopRight()
     }
 
     override fun onDestroy() {
         handler.removeCallbacks(clockTick)
+        handler.removeCallbacks(speedTick)
         handler.removeCallbacks(tempChannelHide)
+        handler.removeCallbacks(tempInfoMaxShow)
         panelAutoClose.cancel()
         // 断开台标回调：Activity 已销毁，再回填会拿到一个死掉的 View 树
         ChannelLogoStore.onLogoLoaded = null
@@ -451,6 +498,8 @@ class MainActivity : AppCompatActivity() {
             super.onBackPressed()
             return
         }
+        // v1.7：《使用须知》没同意前返回键不做事（必须显式选「已阅读并同意」或「退出应用」）
+        if (agreementGate != null) return
         // 自绘对话框优先：返回键只关对话框。
         if (dialogView != null) {
             cancelExitConfirm()
@@ -882,6 +931,8 @@ class MainActivity : AppCompatActivity() {
             // → 直接读 `panel.visibility` 就抛 UninitializedPropertyAccessException。
             // 崩溃报告屏上按任意键必崩，就是这么来的（真机 M17VA-ANSM0 实证）。
             if (!::panel.isInitialized) keysNone
+            // v1.7：《使用须知》在屏时放行给按钮焦点系统（DPAD 移动 + 确认键触发）
+            else if (agreementGate != null) keysNone
             // 自绘对话框开着时必须放行给控件（EditText / 按钮要自己吃方向键与确认键）。
             else if (dialogView != null) keysNone
             // 问题 6：分组管理抽屉开着时同样放行给控件（确认键要能切换显隐）
@@ -1240,12 +1291,79 @@ class MainActivity : AppCompatActivity() {
             override fun onLongPress(e: MotionEvent) {
                 showQuickMenu()
             }
+
+            /** 一次触摸序列只认一次滑动（DOWN 时复位）。 */
+            private var swipeConsumed = false
+
+            override fun onDown(e: MotionEvent): Boolean {
+                swipeConsumed = false
+                return false
+            }
+
+            /**
+             * 累计位移判定（v1.7 补）：`input swipe`／手指慢滑在 API 19 模拟器上
+             * 可能不产生 fling 速度（onFling 不回调，实测踩到），所以滑动到阈值
+             * 就立即认定，不等抬手。
+             */
+            override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
+                if (swipeConsumed || e1 == null) return false
+                val adx = Math.abs(e2.x - e1.x)
+                val ady = Math.abs(e2.y - e1.y)
+                if (adx >= SWIPE_MIN_PX || ady >= SWIPE_MIN_PX) {
+                    swipeConsumed = true
+                    onScreenSwipe(e1.x, e1.y, e2.x - e1.x, e2.y - e1.y)
+                }
+                return false
+            }
+
+            override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
+                if (e1 == null) return false
+                onScreenSwipe(e1.x, e1.y, e2.x - e1.x, e2.y - e1.y)
+                return true
+            }
         })
+    }
+
+    /**
+     * v1.7（用户要求）：全屏画面上的滑动手势（面板/弹层都不在屏时才生效）——
+     *  · **上滑 = 下一频道，下滑 = 上一频道**（跨分组循环，与遥控器上下键同一条链路）；
+     *  · **右滑 = 下一条线路，左滑 = 上一条线路**（多线路频道才有动作，与左右键一致）。
+     *
+     * 用 onFling（要有初速度）而不是 onScroll：慢慢拖动 EPG 列表不会误触发换台。
+     * 防抖只挡 500ms 内的重复触发（一次 fling 的 DOWN/UP 序列不会重复回调），
+     * **不能**用 tempChannelVisible（12 秒兜底窗口）拦截 —— 那会让用户在换台后
+     * 十几秒里觉得"手势失灵"（模拟器实测踩到）。
+     */
+    private var lastSwipeAt = 0L
+
+    private fun onScreenSwipe(x: Float, y: Float, dx: Float, dy: Float) {
+        if (!::panel.isInitialized) return          // 判据 11-2：视图树没建好不走手势
+        if (dialogView != null) return              // 自绘对话框开着时手势不生效
+        if (agreementGate != null) return           // 使用须知没同意前手势不生效
+        if (groupManageView != null) return         // 分组管理抽屉开着时不生效
+        if (dlnaView != null) return                // 投屏抽屉开着时不生效
+        if (panel.visibility == View.VISIBLE) return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastSwipeAt < 500L) return        // 防抖：连续 fling 只认第一次
+        lastSwipeAt = now
+
+        val adx = Math.abs(dx)
+        val ady = Math.abs(dy)
+        if (adx < SWIPE_MIN_PX && ady < SWIPE_MIN_PX) return
+        UiLog.i("手势", "滑动换台 dx=$dx dy=$dy → " + if (adx > ady) (if (dx > 0) "下一条线路" else "上一条线路") else (if (dy < 0) "下一频道" else "上一频道"))
+        if (adx > ady) {
+            // 水平主轴 → 切线路（右滑 +1 下一条，左滑 -1 上一条，与遥控器左右键一致）
+            changeLineBy(if (dx > 0) 1 else -1)
+        } else {
+            // 垂直主轴 → 切频道（用户指定：上滑 = 下一个，下滑 = 上一个）
+            changeChannelBy(if (dy < 0) 1 else -1)
+        }
     }
 
     private fun onScreenTap(x: Float, y: Float) {
         if (!::panel.isInitialized) return          // 判据 11-2：崩溃报告屏下视图树未建
         if (dialogView != null) return              // 自绘对话框开着时，画面点击不生效
+        if (agreementGate != null) return           // v1.7：《使用须知》没同意前点击不穿透
         // 问题 6：分组管理抽屉开着时，点面板以外的地方 = 关闭抽屉
         if (groupManageView != null) {
             closeGroupManage()
@@ -1895,8 +2013,16 @@ class MainActivity : AppCompatActivity() {
 
     // ---------------- 数据 ----------------
 
-    private fun loadSource(url: String) {
-        showBottomStatus("正在载入直播源…")
+    /**
+     * v1.7 换源提醒：[label] 非空 = 用户手动切换订阅源 ——
+     * 底部先挂粘性的「正在切换源：XX …」，加载完换成「已切换：XX（N 个频道）」，
+     * 失败则给出原因（保持粘性）。启动时传 null，维持原来的「正在载入直播源…」。
+     */
+    private fun loadSource(url: String, label: String? = null) {
+        showBottomStatus(
+            if (label != null) "正在切换源：$label …" else "正在载入直播源…",
+            sticky = true,
+        )
         Thread {
             val fetched = fetchSourceBody(url)
             val body = fetched.first
@@ -1919,7 +2045,10 @@ class MainActivity : AppCompatActivity() {
                     // 而且当前正在看的频道列表被无声替换掉，完全没有可诊断的信息。
                     // 现在：解析失败就**保留原列表**，把真实原因挂在底栏（粘性，不自动消失）。
                     val reason = err ?: "内容不是有效的直播源格式（既无 #EXTINF 也无 #genre#）"
-                    showBottomStatus("源加载失败：$reason", sticky = true)
+                    showBottomStatus(
+                        if (label != null) "切换源失败：$reason" else "源加载失败：$reason",
+                        sticky = true,
+                    )
                     android.util.Log.w("源加载", "加载失败，保留原列表：$reason")
 
                     // 只有「一个频道都没有」时才用演示源兜底，保证首次启动/断网时界面不是空的。
@@ -1930,6 +2059,16 @@ class MainActivity : AppCompatActivity() {
                     }
                 } else {
                     renderAll(ChannelParser.toGroupList(parsed))
+                    // v1.7：切换成功给一个非粘性的完成提示（1.5 秒后自动收）；
+                    // 启动载入没有完成提示，但要把"正在载入…"的粘性状态解除，
+                    // 否则节目信息被它顶住、底栏永远显示「正在载入直播源…」。
+                    if (label != null) {
+                        showBottomStatus("已切换：$label（共 ${groupList.flatChannels().size} 个频道）")
+                    } else {
+                        bottomStatusSticky = false
+                        bottomStatusUntil = 0L
+                        refreshBottomVisibility()
+                    }
                     // 问题 6：源就位后回到上次频道。**恢复成功才置位** ——
                     // 首次加载失败时不会把机会用掉，等真正加载到目标源时还能再试。
                     if (!lastChannelRestored && restoreLastChannel()) lastChannelRestored = true
@@ -2247,7 +2386,9 @@ class MainActivity : AppCompatActivity() {
         // 否则新源会拿旧源的序号去跳，跳到风马牛不相及的频道。
         Prefs.setIptvLastChannelIdx(this, 0)
         lastChannelRestored = false
-        loadSource(src.url)
+        // v1.7（用户要求）：切源时在底部给一个明确的「正在切换」提醒（粘性，
+        // 直到加载成功换成「已切换」或失败给出原因，不会 1.5 秒就闪没了）。
+        loadSource(src.url, src.name)
     }
 
     private fun confirmRemoveSource(src: IptvSource) {
@@ -2545,6 +2686,46 @@ class MainActivity : AppCompatActivity() {
 
     /** 当前自绘对话框（非 null 时：按键放行给控件、返回键只关它、画面点击不生效）。 */
     private var dialogView: View? = null
+
+    /** v1.7：首次启动《使用须知》全屏层（非 null 时按键/手势都不进主界面）。 */
+    private var agreementGate: View? = null
+
+    /**
+     * 挂上《使用须知》全屏层（对应原版 `AgreementScreen`：未同意时它是唯一界面）。
+     * 顶层是 [AgreementView]，本身 clickable 挡住底下视图的点击；
+     * 按键路由在 [currentKeyHandler] 里放行（按钮要靠焦点移动 + 确认键触发）。
+     */
+    private fun showAgreementGate() {
+        if (agreementGate != null) return
+        val gate = AgreementView(
+            this,
+            onAgree = {
+                UiLog.i("界面", "《使用须知》：已阅读并同意")
+                hideAgreementGate()
+            },
+            onDisagree = {
+                UiLog.i("界面", "《使用须知》：不同意 → 退出应用")
+                finish()
+            },
+        )
+        agreementGate = gate
+        rootView.addView(gate, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        gate.bringToFront()
+        gate.post {
+            // 找到「已阅读并同意」按钮给它焦点（AgreementView 构造时已 requestFocus，
+            // 但刚 addView 时可能还没完成布局，这里补一发）
+            runCatching { gate.requestFocus() }
+        }
+        UiLog.i("界面", "《使用须知》：显示（首次启动）")
+    }
+
+    private fun hideAgreementGate() {
+        val v = agreementGate ?: return
+        (v.parent as? ViewGroup)?.removeView(v)
+        agreementGate = null
+        refreshTopRight()
+    }
 
     private fun showAppDialog(built: AppDialog.Built) {
         closeAppDialog()

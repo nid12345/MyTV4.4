@@ -1251,3 +1251,72 @@ SHA-256 `02e143e8…f7c2`，可直接覆盖安装）+ `dist/MyTV-Legacy-v1.2-deb
   `403 Must have admin rights to Repository`（PAT 有 `repo` scope 但仍被拒，疑似账号级删除限制）。
   需到 `https://github.com/nid12345/MyTV4.4-test/settings` 最底部手动 **Delete this repository**。
 - 可选瘦身：只保留 `armeabi-v7a` + `arm64-v8a` 可省约 4.7 MB。
+
+
+---
+
+## v1.7 修复轮（2026-10-09 深夜，用户真机反馈：播放卡 + 4 项功能）
+
+### 问题 0：播放卡顿（用户："同一源原版流畅，4.4 版卡甚至播不出"）
+- **根因 1（代码缺陷，已修）**：`PlayerController.softDecodeUsed` 一旦置 true **永远生效** ——
+  某频道硬解 init 失败切软解后，之后**所有频道**都在软解里播；老设备软解 1080p 必卡。
+  修法：`startPlay()` 开头调 `resetSoftDecodeIfNeeded()`，换频道复位回硬解优先
+  （软解播放器必须整体重建才能变回硬解，renderersFactory 建播放器时就定了）。
+- **根因 2（设备能力，如实告知）**：模拟器实证：1080p High Profile（`avc1.64002A/29/1F`）
+  `format_supported=NO_EXCEEDS_CAPABILITIES` → 软解 `OMX.google.h264.decoder` → `DECODING_FAILED`
+  → 归位重试 → 线路降级风暴。真机老盒子同理 —— 硬解不支持的流只能软解或反复重试，这是"卡"的
+  硬件面。缓解：换低画质线路；应用侧把缓冲调优做了。
+- **缓冲调优**（`buildPlayer` 加 DefaultLoadControl）：起播 2500→1200ms、
+  卡顿后恢复 4000ms、前向缓冲 30~60s、`prioritizeTimeOverSizeThresholds(true)`。
+- **排障打点**：新增 AnalyticsListener `视频解码器=XXX 初始化耗时=Nms`（真机可区分硬/软解）。
+
+### 问题 1：换源提醒 —— 已做
+- `loadSource(url, label)`：手动换源传源名 → 底部**粘性**「正在切换源：XX …」；
+  成功 →「已切换：XX（N 个频道）」（1.5 秒自动收）；失败 →「切换源失败：原因」（粘性）。
+- 启动载入（label=null）保持「正在载入直播源…」但改为粘性，成功后解除粘性
+  （否则底栏永远显示"正在载入"，实测踩到：sticky 起始后成功分支必须清）。
+
+### 问题 2：实时网速 + 信息框时序 —— 已做（实测）
+- **实时网速**：新增 `player/MeteredDataSource.kt`（包装 DataSource，read 计数）
+  + `NetMeter`（2 秒滑窗真实速率，200ms 采样点）。`speedKBps` 从"带宽估计"改为真实下载速率。
+  实测日志：网速 2069→1781→2145→1859 KB/s 逐次变动；缓冲充满/暂停自然归零。
+  `openCurrent()` 换线路时 `NetMeter.reset()` 防串读数。
+- **信息框时序**：换台/切线路显示 → **画面出来（onVideoSize）后 2 秒**收
+  （`READY_HIDE_AFTER_MS=2000`）；画面一直不出则 12 秒兜底（`tempInfoMaxShow`，实测日志
+  「信息块兜底收起（画面迟迟未出）」）。
+- **刷新频率**：新增 `speedTick`（500ms），信息块/快捷菜单可见时刷新网速与信息块内容。
+
+### 问题 3：触屏手势 —— 已做（实测）
+- 手势链路（`dispatchTouchEvent` → GestureDetector，`MainActivity.onScreenSwipe`）：
+  **上滑=下一频道、下滑=上一频道、右滑=下一条线路、左滑=上一条线路**（与遥控器左右键一致）。
+- 生效条件：面板/对话框/分组管理/投屏/使用须知都不在屏。
+- **两个实测踩坑**：
+  ① 不能用 `tempChannelVisible`（12 秒兜底窗口）做防抖 —— 换台后十几秒手势"失灵"。
+     改为 500ms `lastSwipeAt` 防抖。
+  ② `input swipe` 在 API 19 模拟器上不产生 fling 速度（`onFling` 不回调）→
+     补 `onScroll` 累计位移判定（≥90px 认定，一次触摸序列只认一次，DOWN 复位）。
+- 实测日志：「手势：滑动换台 dx=-285.3 dy=0.0 → 上一条线路」；
+  上滑实测 CCTV-2→CCTV-3（跨分组换台）。
+
+### 问题 4：首次启动《使用须知》 —— 已做（实测）
+- 新增 `ui/AgreementView.kt`：全屏覆盖层（**不是对话框**，对齐原版 `AgreementScreen`），
+  标题「使用须知」+ 正文 5 条**逐字照抄原版**（APP_TITLE 换成 MyTV4.4）+ 按钮
+  「已阅读并同意 / 退出应用」（容器色 onSurface α0.1，默认焦点在同意）。
+- `Prefs.appAgreementAgreed`（`APP_AGREEMENT_AGREED`，默认 false，对应原版 `Configs.appAgreementAgreed`）。
+- 门禁：未同意时按键路由 `keysNone`（放行给按钮焦点）、返回键不做事、
+  画面 tap/滑动不穿透；同意落库后移除覆盖层；「退出应用」→ `finish()`。
+- **实测踩坑**：按钮设了 `isFocusableInTouchMode` → 触屏第一次点只拿焦点不触发 onClick
+  （模拟器实证：点同意无反应）。去掉后正常。
+- 验证：UI dump 文本与原版逐字一致；同意 → 落库 → 重启不再弹。
+
+### 产物（v1.7，versionCode 12，同一把钥匙 02e143e8…f7c2）
+- `dist/MyTV4.4-v1.7-legacy12.apk`（release 10,299,736 B，MD5 `a5c6911a0de498e94a1262d986e25841`）
+- `dist/MyTV4.4-v1.7-legacy12-debug.apk`（debug 17,091,216 B，MD5 `ed898171514280c8b4c445dee235ceb2`；
+  无混淆 classes3.dex 9.2MB，比 v1.6 大属 debug 正常波动）
+- `update/version.json` → v1.7 清单（应用内升级通道会提示 v1.6 用户升级）
+
+### 遗留 / 待真机确认
+- 「正在切换源」提醒的换源面板路径未单独 UI 实测（与启动载入同一条 showBottomStatus 链路）。
+- 软解复位（问题 0 根因 1）在模拟器上无法自然触发 `DECODER_INIT_FAILED`（只有 DECODING_FAILED），
+  逻辑经审查，效果待真机日志（看「换频道：软解已复位」）。
+- 卡顿改善幅度取决于源画质与盒子硬解能力：1080p High Profile 流在老盒子上任何播放器都只能软解。

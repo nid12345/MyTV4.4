@@ -115,7 +115,23 @@ class PlayerController(private val context: Context) {
         }
     }
 
-    private var exoPlayer: ExoPlayer = buildPlayer(false).also { it.addListener(listener) }
+    /**
+     * 解码器打点（v1.7）：真机排查"卡顿"的关键证据 ——
+     * 看日志里用的是硬解（OMX.xx / c2.qcom）还是软解（OMX.google / c2.android / ffmpeg），
+     * 以及初始化耗时。没有这行，"卡"就只能是猜。
+     */
+    private val analytics = object : com.google.android.exoplayer2.analytics.AnalyticsListener {
+        override fun onVideoDecoderInitialized(
+            eventTime: com.google.android.exoplayer2.analytics.AnalyticsListener.EventTime,
+            decoderName: String,
+            initializedTimestampMs: Long,
+            initializationDurationMs: Long,
+        ) {
+            UiLog.i(TAG, "视频解码器=$decoderName 初始化耗时=${initializationDurationMs}ms")
+        }
+    }
+
+    private var exoPlayer: ExoPlayer = buildPlayer(false)
 
     /** 供上层直接拿 ExoPlayer（例如 M8 做 seek / 倍速）。 */
     val player: ExoPlayer get() = exoPlayer
@@ -169,7 +185,9 @@ class PlayerController(private val context: Context) {
             .setAllowCrossProtocolRedirects(true)
 
     private fun newDataSourceFactory(): DataSource.Factory =
-        DefaultDataSource.Factory(context, httpFactory)
+        // v1.7：外面再包一层 MeteredDataSource —— 播放链路的每次 read 都计数，
+        // 底栏/信息块的「实时网速」就是这么算出来的（见 NetMeter）。
+        DataSource.Factory { MeteredDataSource(DefaultDataSource.Factory(context, httpFactory).createDataSource()) }
 
     /**
      * 软解优先的 MediaCodec 选择器
@@ -216,8 +234,29 @@ class PlayerController(private val context: Context) {
 
         return ExoPlayer.Builder(context)
             .setRenderersFactory(renderersFactory)
+            // v1.7（用户反馈"播放比较卡"）：直播缓冲调优。
+            //  · 起播门槛 2500ms → 1200ms：换台后更快出画面；
+            //  · 卡顿后恢复门槛 4000ms：攒够 4 秒再恢复播放，避免一缓冲就反复卡；
+            //  · 前向缓冲 30~60 秒：给 WiFi 抖动留余量（老盒子解码慢，缓存深一点更稳）。
+            // 原版 media3 没配 LoadControl（全默认），但原版跑的是 Android 5+ 的设备，
+            // 这里是为 API 19 老硬件做的补偿，不违背"对齐原版策略"。
+            .setLoadControl(
+                com.google.android.exoplayer2.DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        /* minBufferMs = */ 30_000,
+                        /* maxBufferMs = */ 60_000,
+                        /* bufferForPlaybackMs = */ 1_200,
+                        /* bufferForPlaybackAfterRebufferMs = */ 4_000,
+                    )
+                    .setPrioritizeTimeOverSizeThresholds(true)
+                    .build()
+            )
             .build()
-            .apply { playWhenReady = true }
+            .apply {
+                playWhenReady = true
+                addListener(listener)
+                addAnalyticsListener(analytics)
+            }
     }
 
     // ---------------- 错误恢复（对齐原版 Media3VideoPlayer.onPlayerError） ----------------
@@ -300,7 +339,6 @@ class PlayerController(private val context: Context) {
         dataSourceFactory = newDataSourceFactory()
 
         exoPlayer = buildPlayer(softDecode = true)
-        exoPlayer.addListener(listener)
 
         surfaceView?.let { exoPlayer.setVideoSurfaceView(it) }
 
@@ -313,6 +351,28 @@ class PlayerController(private val context: Context) {
         } else {
             UiLog.w(TAG, "重建播放器后没有可恢复的地址")
         }
+    }
+
+    /**
+     * 换频道时把软解状态复位回硬解（v1.7，见 [startPlay] 里的说明）。
+     *
+     * 软解播放器必须整体重建才能变回硬解（renderersFactory 建播放器时就定了），
+     * 这里不恢复当前媒体 —— 反正马上就要 prepare 新频道。
+     */
+    private fun resetSoftDecodeIfNeeded() {
+        if (!softDecodeUsed) return
+        softDecodeUsed = false
+        contentTypeAttempts.clear()
+        liveSeekRetried = false
+        runCatching {
+            exoPlayer.removeListener(listener)
+            exoPlayer.release()
+        }
+        httpFactory = newHttpFactory()
+        dataSourceFactory = newDataSourceFactory()
+        exoPlayer = buildPlayer(softDecode = false)
+        surfaceView?.let { exoPlayer.setVideoSurfaceView(it) }
+        UiLog.i(TAG, "换频道：软解已复位，回到硬解优先")
     }
 
     private fun currentUri(): Uri? =
@@ -342,6 +402,12 @@ class PlayerController(private val context: Context) {
     }
 
     private fun startPlay(urls: List<String>, startIdx: Int) {
+        // v1.7（卡顿根因修复）：软解只应该服务"触发它的那一次恢复"。
+        // 之前 `softDecodeUsed` 一旦置 true 就**永远生效** —— 某个频道硬解 init 失败
+        // 切到软解后，后面所有频道全在软解里播，老设备软解 1080p 必卡，
+        // 真机表现就是"整体都卡、甚至播不动"。现在**换频道时复位回硬解**，
+        // 哪个频道真需要软解，让那个频道自己再触发一次。
+        resetSoftDecodeIfNeeded()
         urlQueue = urls.filter { it.isNotBlank() }
         if (urlQueue.isEmpty()) {
             onError?.invoke("该频道没有可用线路")
@@ -368,27 +434,21 @@ class PlayerController(private val context: Context) {
     val lineCount: Int get() = urlQueue.size
 
     /**
-     * 当前线路的**网速读数**（KB/s），供底栏的 `0KB/s` 角标使用（对齐原版 `ChannelInfo`）。
+     * 当前线路的**实时网速**（KB/s），供底栏角标与频道信息块使用（对齐原版 `ChannelInfo`）。
      *
-     * 取 ExoPlayer 的带宽估计 `bandwidthMeter.bitrateEstimate`（bit/s → KB/s）。
-     * 注：原版是"瞬时下载速率"，2.x 只直接给估计值；未在播放（暂停/切台/出错）时归 0，
-     * 免得停着还挂一个非零数字骗人。
+     * v1.7 改为**真实测速**：[NetMeter] 统计播放 DataSource 每秒实际读到的字节。
+     * 之前用 `DefaultBandwidthMeter.bitrateEstimate`（滑动平均估值），
+     * 表现为"读数长期不动/缓冲满了也不归零"，不是用户要的实时网速。
+     * 现在缓冲充满、暂停时读数自然回落到 0 —— 都是真实状态。
      */
     val speedKBps: Int
-        get() = runCatching {
-            val playing = exoPlayer.isPlaying || exoPlayer.playbackState == Player.STATE_BUFFERING
-            if (!playing) 0
-            else {
-                // ExoPlayer 2.18 把带宽估计挂在 DefaultBandwidthMeter 上（播放器默认即用单例），
-                // bit/s → KB/s。
-                val meter = com.google.android.exoplayer2.upstream.DefaultBandwidthMeter
-                    .getSingletonInstance(context)
-                (meter.bitrateEstimate / 8 / 1024).coerceAtLeast(0).toInt()
-            }
-        }.getOrDefault(0)
+        get() = runCatching { (NetMeter.recentBytesPerSec() / 1024L).coerceAtLeast(0L).toInt() }
+            .getOrDefault(0)
 
     private fun openCurrent() {
         val url = urlQueue.getOrNull(urlIdx) ?: return
+        // 换线路/重开线路：网速窗口清零，避免把上一条线路的字节算进新线路的读数
+        NetMeter.reset()
         prepareUri(Uri.parse(url.let { if (it.endsWith("?")) "${it}t" else it }), null)
     }
 
