@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  主题色板 —— 逐字抄自 MyTV 1.7（源码 tag `custom-v1.7`，提交 7d1081f）
+  `core/designsystem/theme/Color.kt` 的 `darkColors`（界面固定暗色）。
+
+  原版的色值**不在资源里**（在 Kotlin 对象里），本文件把它们转成资源，
+  作为本工程色彩的唯一来源；`ui/Palette.kt` 读取本文件，不再自带字面量。
+
+  ⚠️ lightColors 按第二步计划要求"保留供参考（不进包）"——
+  资源文件一旦放进 res/values 就会进包，因此 lightColors 只以注释形式保留在本文件头部，
+  需要时再单独建 values-night 或直接取消注释。
+  ===========================================================================
+  参考（lightColors，**不参与打包**）：
+    primary 0xFF0B57D0 / onPrimary 0xFFFFFFFF / primaryContainer 0xFFD3E3FD
+    onPrimaryContainer 0xFF041E49 / secondary 0xFF00639B / onSecondary 0xFFFFFFFF
+    secondaryContainer 0xFFC2E7FF / tertiary 0xFF146C2E / error 0xFFB3261E
+    background 0xFFFFFFFF / onBackground 0xFF1F1F1F / surface 0xFFFFFFFF
+    onSurface 0xFF1F1F1F / surfaceVariant 0xFFE1E3E1 / onSurfaceVariant 0xFF444746
+    outline 0xFF747775 / outlineVariant 0xFFC4C7C5 / inverseSurface 0xFF303030
+    inverseOnSurface 0xFFF2F2F2 / inversePrimary 0xFFA8C7FA
+    surfaceContainerLowest 0xFFFFFFFF / surfaceContainerLow 0xFFF8FAFD
+    surfaceContainer 0xFFF0F4F9 / surfaceContainerHigh 0xFFE9EEF6
+    surfaceContainerHighest 0xFFDDE3EA / surfaceDim 0xFFD3DBE5 / surfaceBright 0xFFFFFFFF
+  ===========================================================================
+-->
+<resources>
+
+    <!-- ============ 主色 ============ -->
+    <color name="md_primary">#FFA8C7FA</color>
+    <color name="md_on_primary">#FF062E6F</color>
+    <color name="md_primary_container">#FF0842A0</color>
+    <color name="md_on_primary_container">#FFD3E3FD</color>
+    <color name="md_primary_fixed">#FFD3E3FD</color>
+    <color name="md_primary_fixed_dim">#FFA8C7FA</color>
+    <color name="md_on_primary_fixed">#FF041E49</color>
+    <color name="md_on_primary_fixed_variant">#FF0842A0</color>
+
+    <!-- ============ 次色 ============ -->
+    <color name="md_secondary">#FF7FCFFF</color>
+    <color name="md_on_secondary">#FF003355</color>
+    <color name="md_secondary_container">#FF004A77</color>
+    <color name="md_on_secondary_container">#FFC2E7FF</color>
+    <color name="md_secondary_fixed">#FFC2E7FF</color>
+    <color name="md_secondary_fixed_dim">#FF7FCFFF</color>
+    <color name="md_on_secondary_fixed">#FF001D35</color>
+    <color name="md_on_secondary_fixed_variant">#FF004A77</color>
+
+    <!-- ============ 第三色 ============ -->
+    <color name="md_tertiary">#FF6DD58C</color>
+    <color name="md_on_tertiary">#FF0A3818</color>
+    <color name="md_tertiary_container">#FF0F5223</color>
+    <color name="md_on_tertiary_container">#FFC4EED0</color>
+    <color name="md_tertiary_fixed">#FFC4EED0</color>
+    <color name="md_tertiary_fixed_dim">#FF6DD58C</color>
+    <color name="md_on_tertiary_fixed">#FF072711</color>
+    <color name="md_on_tertiary_fixed_variant">#FF0F5223</color>
+
+    <!-- ============ 错误 ============ -->
+    <color name="md_error">#FFF2B8B5</color>
+    <color name="md_on_error">#FF601410</color>
+    <color name="md_error_container">#FF8C1D18</color>
+    <color name="md_on_error_container">#FFF9DEDC</color>
+
+    <!-- ============ 背景 / 表面 ============ -->
+    <color name="md_background">#FF000000</color>
+    <color name="md_on_background">#FFE3E3E3</color>
+    <color name="md_surface">#FF0E0E0E</color>
+    <color name="md_on_surface">#FFE3E3E3</color>
+    <color name="md_surface_variant">#FF444746</color>
+    <color name="md_on_surface_variant">#FFC4C7C5</color>
+
+    <!-- ============ 描边 / 遮罩 ============ -->
+    <color name="md_outline">#FF8E918F</color>
+    <color name="md_outline_variant">#FF444746</color>
+    <color name="md_scrim">#FF000000</color>
+    <color name="md_shadow">#FF000000</color>
+
+    <!-- ============ 反色（焦点态用） ============ -->
+    <color name="md_inverse_surface">#FFE3E3E3</color>
+    <color name="md_inverse_on_surface">#FF303030</color>
+    <color name="md_inverse_primary">#FF0B57D0</color>
+
+    <!-- ============ 表面容器层级 ============ -->
+    <color name="md_surface_dim">#FF131313</color>
+    <color name="md_surface_bright">#FF37393B</color>
+    <color name="md_surface_container_lowest">#FF0E0E0E</color>
+    <color name="md_surface_container_low">#FF1B1B1B</color>
+    <color name="md_surface_container">#FF1E1F20</color>
+    <color name="md_surface_container_high">#FF282A2C</color>
+    <color name="md_surface_container_highest">#FF333537</color>
+
+</resources>

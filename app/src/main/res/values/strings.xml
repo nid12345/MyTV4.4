@@ -1,0 +1,4 @@
+<resources>
+    <!-- 应用显示名（用户要求：MyTV4.4） -->
+    <string name="app_name">MyTV4.4</string>
+</resources>

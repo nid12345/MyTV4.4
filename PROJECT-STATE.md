@@ -1,0 +1,1208 @@
+# 项目状态（每轮开始时必读）
+
+> 本文件是**唯一事实来源**。与对话历史冲突时，以本文件为准。
+> 维护规则：每完成一个模块，追加「已完成」进度、本模块新接口签名、遗留项、下一个强制汇报检查点。
+> 已完成的代码**只记签名，不复述实现**；需要时按路径读取。
+
+---
+
+## 冻结决策（不可推翻，除非用户显式授权）
+
+- minSdk = 19，targetSdk = 28
+- 技术栈：原生 View + ExoPlayer 2.18.1 + okhttp 3.12.13 + appcompat 1.4.2 + core-ktx 1.8.0 + recyclerview 1.2.1
+- 禁止引入：Compose / media3 / kotlinx.serialization / constraintlayout / leanback
+- EPG 形态：竖排列表 + 日期列，不做时间轴
+- 快捷功能菜单：7 项固定顺序，无图标，15 秒自动关闭
+- 设置页：13 分类，54 配置键
+- EPG 日志文案逐字沿用原版：`解析节目单完成，共N个频道，M个节目`
+- 焦点引擎：按内容键（不是下标）记忆与恢复，恢复链整体 `runCatching` 兜底
+- 按键路由：Activity 用 `dispatchKeyEvent`（不是 `onKeyDown`）
+- 验收标准以《第二步计划》为准，不得修改
+
+---
+
+## 当前进度
+
+- 已完成：**M0 / M1 / M2 / M3（含三项补测） / M4 / M5 / M6 / M7 / M8 / M9 / M10 / M13 / M14**
+- 进行中：**无** —— **项目已交付（v1.0）**
+- 未开始：**—**（M11 / M12 已推迟到 v1.1）
+- **最终产物**：`dist/MyTV-Legacy-v1.0.apk`（release 签名）/ `dist/MyTV-Legacy-v1.0-debug.apk`
+- **签名**：`keystore/mytv-release.jks`（alias=mytv，本轮新建，需备份）
+- 下一个强制汇报检查点：**M10 + M14 合并完成后（终检）**
+- **阻塞已清空**：B1（TLS）与 B2（模拟器 DNS）均已修复并复测通过，见下节。
+- **B1 遗留 (c)（HTTPS EPG）已兑现**：M7 接线后首验通过，见 `dist/evidence/M7-evidence.md` 判据 7。
+
+## 📌 已知偏差（记入不追究）
+
+| # | 偏差 | 记录于 |
+|---|---|---|
+| 1 | **M9 分批策略未严格执行**：为省编译轮次（每次 ~2.5 分钟），13 分类一次性建完后统一验收，未按 3 批各跑一次 verify。终轮 verify PASS | 2026-10-07 用户裁决 |
+| 2 | M6 面板拆分推迟到 M10（当时为拆而拆会引入回归） | M6 |
+
+## ⏸ 推迟到 v1.1（2026-10-07 用户裁决：积分预算收紧）
+
+| 模块 | 内容 | 理由 | 状态 |
+|---|---|---|---|
+| **M11** | DLNA 投屏 | 积分预算收紧 | 推迟到 v1.1，本轮不做 |
+| **M12** | 更新安装 | 积分预算收紧 | 推迟到 v1.1，本轮不做 |
+
+## 📅 剩余轮次计划（2026-10-07 用户裁决）
+
+- **本轮**：M9（设置页 13 分类），分 3 批落地，每批跑 `verify-api19.sh`
+- **下一轮**：M10 + M14 合并（焦点引擎完整化 + 拆 4 个 panel 文件 + 最终验证 + 签名）
+- 之后不再安排新模块，直到用户确认 v1.1 范围
+
+> **M3 三项补测已于 2026-10-07 14:55–15:47 跑完**，结论与证据见
+> `dist/evidence/M3-补测-evidence.md`：A（7 档显示比例）**PASS**；B（拔网）10 秒档 **PASS**、
+> 长中断为观察项；C（港台源 / AC-3 / FFmpeg）**未闭环**。
+
+> 本文件于 2026-10-07 12:4x 由新接手的一轮重写进度段（上一轮记录在 08:44 停更，
+> 落后于 12:24 的 B1/B2/M5/M8 证据，导致「停在 TLS 阻塞」的判断是过期状态）。
+
+---
+
+## ✅ 已解除的阻塞（原 B1 / B2，已复测）
+
+### B1（TLS 1.2）—— 已修，复测通过
+
+- **改法**：改 `net/Http.kt`（唯一改动文件）。新增 `tlsContext`（`SSLContext.getInstance("TLSv1.2")`）、
+  `defaultTrustManager`（系统默认 X509）、`applyTls(builder)`；`Http.client()` 内统一挂
+  `sslSocketFactory(ctx.socketFactory, tm)`；新增 TLS 打点 `Log.i("网络TLS", …)`。
+  **`App.kt` 未改**（`enableTls12()` 保留，对 `HttpsURLConnection` 仍有价值）。
+- **复测（API 19 模拟器，真实HTTPS源）**：
+  - `I/源加载(3293): url=https://tvlive.nide.qzz.io 正文长度=33920 错误=无`
+  - `I/MyTVLegacy: 播放器：播放就绪 视频尺寸=0x0 容器=1280x720`（翡翠台，自动降级到 3/5 线路）
+  - 远程台标正向证据 2 例：凤凰卫视电影台、明珠台（`台标已加载（远程）`）
+- **⚠️ 已知残留（不阻塞，但影响 M3 验收 6 的可信度）**：
+  `player/PlayerController.kt:148` 仍用 ExoPlayer 自带的 `DefaultHttpDataSource.Factory()`，
+  **未走 `Http.client()`** —— 播放链路的 TLS 仍只依赖 `App.enableTls12()` 的
+  `HttpsURLConnection` 静态补丁。翡翠台第 1 条线路是 HTTPS，是否单独握手成功**无独立证据**
+  （最终播的是第 3 条）。→ 列入遗留项，**M3 补测时必须单独验一条 HTTPS 线路**。
+
+### B2（模拟器出站 TCP 不通）—— 已修，与 B1 非同一根因
+
+- **根因**：模拟器 DNS 被宿主代理 fake-IP 劫持（解析出 198.18.x.x）。
+- **修法**：启动参数固定 `-dns-server 119.29.29.29,223.5.5.5`，
+  已固化于 `scripts/verify-api19.sh:87`（`DNS_SERVERS`）。
+- 仍失败域名：`raw.githubusercontent.com` / `live.fanmingming.com`（宿主代理 SNI 阻断，
+  属网络环境非应用问题）；`gitee.com` / `gcore.jsdelivr.net` 可达。
+
+---
+
+## M3 产出（玩家层收敛）
+
+```
+player/PlayerController.kt   （重写，对齐原版 Media3VideoPlayer 的三级错误恢复）
+    UA: String = "Mozilla/5.0 (Linux; Android 4.2.2; MyTV-Legacy) AppleWebKit/537.36"
+    onVideoSize / onLineChanged / onStateChanged / onError
+    onDisplayModeApplied: ((VideoPlayerDisplayMode) -> Unit)?      // 新增，M8 回显用
+    player: ExoPlayer
+    currentChannel: Channel?                                        // play(Channel) 时才有值
+    attach(surfaceView: SurfaceView)
+    play(urls: List<String>, startIdx: Int = 0)                      // v0.5 既有签名，MainActivity 在用
+    play(channel: Channel, startIdx: Int = 0)                        // 新增，M5 起应用这个
+    switchLine(idx: Int) ; currentLineIdx ; lineCount
+    currentLiveOffset: Long   // C.TIME_UNSET=非直播
+    currentPosition: Long ; duration: Long
+    isSoftDecode: Boolean
+    applyDisplayMode() ; setDisplayMode(mode, remember = true)
+    play() / pause() / stop() / release()
+player/DisplayMode.kt   （新）
+    data class Frame(left, top, right, bottom)  // width/height
+    ALL: List<VideoPlayerDisplayMode>            // 7 项
+    fixedAspect(mode): Float?
+    layoutRect(mode, videoW, videoH, viewW, viewH): Frame          // 纯函数
+    apply(surface: View, mode, videoW, videoH)
+    resolve(ctx, channel) / remember(ctx, channel, mode)
+    setGlobalDefault(ctx, channel, mode)        // 全局默认 + 清掉本频道覆盖
+    clearChannelOverrides(ctx, channel)
+```
+
+**M3 两处实测修复（见报告）**：
+1. `listener` 必须在 `exoPlayer` **之前**声明，且构造时 `also { it.addListener(listener) }`
+   —— 第一版漏了注册，导致错误恢复/显示比例全部不生效
+2. okhttp 3.x 的 `Response` 字段为 package-private，必须调方法（M2 已记录）
+
+## M4 产出（主题色 / 字号体系）
+
+```
+res/values/colors.xml   （新，48 项）  逐字抄原版 darkColors；lightColors 仅注释保留（不进包）
+res/values/dimens.xml   （新，30 项）  原版 Type.kt 的 **15 级**字号（plan 写 14，实际 15）+ 行高
+ui/Palette.kt           （新）         色值改为读 R.color.*；9 个常量 → 带 Context 的函数
+    background / surface / surfaceAlt / surfaceContainer / surfaceContainerHigh
+    onSurface / onSurfaceVariant / surfaceVariant / primary
+    outlineVariant / inverseSurface / error / outline
+ui/Density.kt           （新）         DESIGN_WIDTH_DP=960f
+    Mode{SCALE_BY_DESIGN_WIDTH, ABSOLUTE} ; resolveMode(prefRatio)
+    computeRatio(prefRatio, screenWidthDp, mode)   // 纯函数
+    scaledDensity(baseDensity, ratio)              // 纯函数
+    currentRatio(ctx) / wrap(base, ratio) / dp / dpF / sp / applyTextSize / describe
+    默认走「按 960 基准等比缩放」；ratio=0f（原版默认）即该模式
+```
+**M4 调用点改动**：`Palette.ON_SURFACE` → `Palette.onSurface(this@MainActivity)` 共 **27 处**（MainActivity）、
+`Palette.*` → `Palette.*(context)` 共 **7 处**（ChannelCardView）；旧的 `object Palette` 已从 `UiKit.kt` 移除。
+
+## M5 产出（主界面 / 播放页）
+
+```
+ui/DatetimeView.kt        （新，104 行） 移植 DatetimeScreen/DateTimeDetail
+    class DatetimeView(context) : TextView
+    tick(now, mode: Prefs.UiTimeShowMode, channelNumber, logo)
+ui/system/ScreenAutoClose.kt （新，66 行）移植 rememberScreenAutoCloseState 语义
+    class ScreenAutoClose(timeoutMs: Long, onTimeout: () -> Unit)
+    active() / cancel() / isRunning
+ui/system/Snackbar.kt     （新，89 行）移植原版 Snackbar（含 ERROR 类型）
+    object Snackbar
+    with(activity) / show(message, activity = host)
+MainActivity.kt           （改动）
+    attachBaseContext()      → Density.wrap(newBase, Density.currentRatio(newBase)) :210
+    onBackPressed()          → 分层关闭：菜单 → 面板 → 系统 :275
+    panelAutoClose: ScreenAutoClose（超时取 Prefs.uiScreenAutoCloseDelay，默认 15000） :141
+    player.play(ch)          改用 Channel 重载（currentChannel 才会被填上） :1400
+    UiLog.i("界面", "密度缩放：${Density.describe(this)}") :249
+App.kt                    （改动，仅 1 行 + 2 行注释）
+    onCreate: runCatching { Prefs.migrateIfNeeded(this) }   :32
+```
+
+**⚠️ 与《第二步计划》§M5 的偏差（未做，需记录）**：
+计划要求新建 `ui/TopBarView.kt` / `ui/BottomBarView.kt` 给 MainActivity 瘦身 —— **未建这两个文件**，
+顶栏/底栏仍在 `MainActivity.kt` 内。结果 MainActivity 从基线 1007 行涨到 **1478 行**。
+（不回头拆：M6 会把三列拆到 `ui/panel/`，届时一并处理。）
+
+## M8 产出（快捷功能菜单 7 项）
+
+```
+ui/quickop/QuickOpView.kt   （新，371 行）
+    enum class Action { DLNA, EPG, CHANNEL_URL, CONTROLLER, DISPLAY_MODE, CLEAR_CACHE, MORE_SETTINGS }
+    ENTRIES: List<Pair<String, Action>>   // :61-67 顺序：投屏/节目单/多线路/播放控制/显示模式/清除缓存/更多设置
+    var onAction: ((Action) -> Unit)?     // :100
+    var onClosed: (() -> Unit)?           // :101
+    var onSourceSelect: (() -> Unit)?     // :109（左上订阅源，带 ⇄ 占位图标 + 呼吸动画）
+    open(channelNumber, sourceName) / close() / tick(now) / isOpen / labels()
+```
+MainActivity 侧：`showQuickMenu()` :670；`onQuickOpAction()` :717；`dispatchKeyEvent` :483
+接 MENU/SETTINGS/HELP/H 与长按 OK。
+
+**⚠️ M8 遗留观察（见 M8-evidence §遗留观察）**：
+1. 长按 OK 在「先唤出面板再 BACK」的脏状态序列下出现过「面板+菜单同开」组合态
+   （干净启动对照正常）→ 待 M9+ 状态机收敛时复查。
+2. 「显示模式」点击后 prefs 已写（`VIDEO_PLAYER_DISPLAY_MODE value=5`），但 Snackbar 未观察到 → 待复核。
+
+---
+
+## 已完成模块的接口签名（只记接口，不记实现）
+
+### M0 定稿文件（禁止改动）
+
+```
+app/build.gradle.kts
+app/src/main/AndroidManifest.xml
+app/src/main/java/top/yogiczy/mytv/legacy/App.kt
+app/proguard-rules.pro
+res/mipmap-*/  、 res/drawable-xhdpi/tv_banner.png
+```
+M0 参数：`minSdk=19 / targetSdk=28 / versionCode=6 / versionName=1.0-legacy.6 / compileSdk=34`
+
+### M1 产出（禁止改动，除非 M10 明确要求）
+
+```
+core/Keys.kt
+    keys.TAG: String
+    Keys.Action{LEFT,LONG_LEFT,RIGHT,LONG_RIGHT,UP,LONG_UP,DOWN,LONG_DOWN,
+                SELECT,LONG_SELECT,SETTINGS,NUMBER}
+    class Keys.Handler(onLeft,onLongLeft,onRight,onLongRight,onUp,onLongUp,
+                       onDown,onLongDown,onSelect,onLongSelect,onSettings,onNumber)
+    Keys.dispatch(event: KeyEvent, handler: Handler): Boolean
+    Keys.reset()
+core/FocusEngine.kt
+    FocusEngine.TAG: String
+    bind(view: View, key: Any)
+    keyOf(view: View): Any?
+    remember(container: ViewGroup?, view: View)
+    forget(container: ViewGroup?)
+    focusFirstIn(container: ViewGroup?): Boolean
+    restoreFocus(container: ViewGroup?, anchor: Any? = null): Boolean
+    isAtBoundary(from: View?, direction: Int): Boolean
+    moveOrAct(from: View?, direction: Int, onBoundary: () -> Unit): Boolean
+    currentFocusOf(container: View?): View?
+```
+
+### M2 产出
+
+```
+data/ChannelName.kt   （object ChannelName，逐字移植自 core/data/utils/ChannelName.kt）
+    normalize(raw: String): String
+    coreKey(raw: String): String?
+    matches(left: String, right: String): Boolean
+    logoFileName(raw: String): String
+
+data/ChannelUtil.kt   （object ChannelUtil，逐字移植自 core/data/utils/ChannelUtil.kt）
+    HYBRID_WEB_VIEW_URL_PREFIX: String
+    getHybridWebViewUrl(channelName: String): List<String>?
+    isHybridWebViewUrl(url: String): Boolean
+    getHybridWebViewUrlProvider(url: String): String
+    urlSupportPlayback(url: String): Boolean
+    urlToCanPlayback(url: String): String
+
+data/Channel.kt       （改动：只补索引 API）
+    data class Channel(name, urlList, logo, epgName, groupName)
+        url / isPlayable / lineCount
+    data class ChannelGroup(name, channels)  // size
+    data class ChannelGroupList(groups)      // size / channelCount
+        flatChannels(): List<Channel>
+        groupIndexOf(name: String): Int
+        getOrNull(i: Int): ChannelGroup?
+        // 以下三个对齐原版 ChannelGroupList.kt companion
+        ChannelGroupList.channelGroupIdx(channel: Channel): Int
+        ChannelGroupList.channelIdx(channel: Channel): Int
+        val ChannelGroupList.channelList: List<Channel>
+
+data/Epg.kt
+    data class EpgProgramme(startAt, endAt, title)
+        EpgProgramme.isLive() / .progress(current) / .remainingMinutes(current)
+        EpgProgramme.EXAMPLE / .EMPTY
+    data class EpgProgrammeList(value: List<EpgProgramme>) : List<EpgProgramme>
+    data class EpgProgrammeRecent(now, next)
+    data class Epg(channel, programmeList)
+        Epg.recentProgramme(): EpgProgrammeRecent
+        Epg.empty(channel: Channel): Epg
+    data class EpgList(value: List<Epg>) : List<Epg>
+        EpgList.recentProgramme(channel: Channel): EpgProgrammeRecent?
+        EpgList.match(channel: Channel): Epg?
+        EpgList.clearCache()
+
+data/EpgFetcher.kt
+    interface EpgFetcher { isSupport(url): Boolean; fetch(response: Response): String }
+        companion: instances: List<EpgFetcher> ; of(url: String): EpgFetcher
+    class XmlEpgFetcher / XmlGzEpgFetcher / DefaultEpgFetcher
+
+data/EpgRepository.kt
+    data class EpgSource(name, url)
+    class EpgRepository(cacheDir: File, source: EpgSource,
+                        fallbackSources: List<EpgSource> = emptyList())
+        clearCache()
+        getEpgList(filteredChannels: List<String> = emptyList(),
+                   refreshTimeThreshold: Int): EpgList      // 失败抛 Exception
+
+data/FileCache.kt     （★超清单新增，见下节）
+    class FileCache(dir: File, fileName: String)
+        lastModified(): Long ; read(): String? ; write(data: String) ; clear()
+        getOrRefresh(isExpired: (Long, String?) -> Boolean, refreshOp: () -> String): String
+        getOrRefresh(cacheTimeMs: Long, refreshOp: () -> String): String
+
+net/Http.kt
+    class Http.HttpError(reason: String) : Exception
+    Http.DEFAULT_USER_AGENT = "ExoPlayer"
+    Http.DEFAULT_LOAD_TIMEOUT_MS = 15000L
+    Http.EPG_CONNECT_TIMEOUT_MS = 15000L ; Http.EPG_READ_TIMEOUT_MS = 60000L
+    client(connectTimeoutMs, readTimeoutMs, userAgent): OkHttpClient
+    open(url, client, block: (Response) -> T): T          // throws HttpError
+    getText(url, client): String ; getBytes(url, client): ByteArray
+    head(url, client, rangeTo: Long? = null): Int
+
+net/LineSpeed.kt
+    class LineSpeed(cacheDir: File, sourceUrl: String)
+        data class LineSpeed.Table(updatedAt, latency: Map<String,Int>,
+                                   throughput: Map<String,Int>)
+        load(): Table
+        refresh(channelUrlGroups: List<List<String>>, force: Boolean = false,
+                excludeUrls: Set<String> = emptySet()): Table
+        sortByCache(channelGroupList: ChannelGroupList, table: Table): ChannelGroupList
+
+data/Prefs.kt
+    data class IptvSource(name, url)
+    data class FavoriteChannel(name, epgName, urlList, logo)
+        toChannelOrNull(): Channel? ; companion of(channel: Channel)
+    enum class VideoPlayerDisplayMode(label, value)   // 7 项，与 1.7 VideoPlayerState.kt 一致
+    enum class UiTimeShowMode(value)                  // HIDDEN/ALWAYS/EVERY_HOUR/HALF_HOUR
+    enum class IptvHybridMode(value)                  // DISABLE/IPTV_FIRST/HYBRID_FIRST
+    object Prefs
+        CURRENT_CONFIG_VERSION = 3 ; EPG_SOURCE_LIST: List<EpgSource> ; defaultSource()
+        --- M0 既有（签名未改）---
+        sources / saveSources / addSource / removeSource / currentSourceUrl / setCurrentSource
+        favorites / toggleFavorite
+        --- M2 新增：直播源 ---
+        iptvLastChannelIdx / setIptvLastChannelIdx
+        iptvLastChannelRememberEnable / setIptvLastChannelRememberEnable
+        iptvChannelChangeFlip / setIptvChannelChangeFlip
+        iptvChannelNoSelectEnable / setIptvChannelNoSelectEnable
+        iptvSourceQuickSwitchEnable / setIptvSourceQuickSwitchEnable
+        iptvSourceLineSpeedSortEnable / setIptvSourceLineSpeedSortEnable
+        iptvHybridMode / setIptvHybridMode
+        --- M2 新增：收藏（线路快照）---
+        iptvChannelFavoriteItems / setIptvChannelFavoriteItems
+        syncFavoriteChannels(channelList)
+        iptvChannelFavoriteEnable / iptvChannelFavoriteListVisible
+        iptvChannelFavoriteChangeBoundaryJumpOut(+setter)
+        --- M2 新增：分组隐藏（按源记忆）---
+        iptvSourceGroupHiddenMap / iptvChannelGroupHiddenList(+setters)
+        iptvSourceGroupNamesMap(+setter)
+        --- M2 新增：节目单 ---
+        epgEnable / epgSourceCurrent / epgSourceList / epgRefreshTimeThreshold (+setters)
+        --- M2 新增：界面 ---
+        uiShowChannelLogo / uiUseClassicPanelScreen / uiShowEpgProgrammeProgress
+        uiDensityScaleRatio / uiFontScaleRatio / uiTimeShowMode / uiFocusOptimize
+        uiScreenAutoCloseDelay (+setters)
+        --- M2 新增：播放器 ---
+        videoPlayerUserAgent / videoPlayerLoadTimeout
+        videoPlayerDisplayMode / videoPlayerDisplayModeChannelMap (+setters)
+        resolveVideoPlayerDisplayMode(ctx, channel)
+        rememberVideoPlayerDisplayMode(ctx, mode, channel)
+        forgetVideoPlayerDisplayMode(ctx, channel)
+        --- M2 新增：更新 / 迁移 ---
+        updateRemindEnable / updateChannel (+setters)
+        migrateIfNeeded(ctx)                     // ★尚无调用点，交 M5
+        iptvChaoshanSourceEnable(+setter)
+
+core/UiLog.kt
+    object UiLog
+        SYSTEM_TAG = "MyTVLegacy" ; MAX_SIZE = 50
+        enum Level{DEBUG,INFO,WARN,ERROR} ; data class Entry(level,tag,message,cause,time)
+        val history: List<Entry> ; format(entry): String ; clear()
+        d/i/w/e(tag: String, message: String, cause: Throwable? = null)
+        // ★tag 一律用中文字面量，禁止用 javaClass.simpleName（R8 会混淆）
+```
+
+### M13 产出
+
+```
+ui/ChannelLogoStore.kt
+    onLogoLoaded: ((String) -> Unit)?        // ★无人订阅，交 M5
+    allNames(ctx: Context): Array<String>
+    match(ctx: Context, channelName: String): String?
+    candidates(ctx: Context, channelName: String): List<String>
+    load(ctx: Context, name: String): Bitmap?
+    bitmapFor(ctx: Context, channelName: String): Bitmap?
+    drawableFor(ctx: Context, channelName: String): Drawable?
+    clearCache()
+```
+
+---
+
+## 超出第二步计划清单的新增
+
+- **data/FileCache.kt（M2）** —— 原版有等价基类 `FileCacheRepository`，本工程为等价实现。
+  （裁决 1：保留）
+
+---
+
+## 与原版有意差异（M14 验收时对照）
+
+- **EpgRepository**：缓存损坏视为过期 / 逐源失败原因拼接 / 非 XML 空内容算失败
+  —— 均为原版健壮性缺口，不影响正常路径。（裁决 2：保留）
+- **EpgFetcher**：去 `suspend`（本工程不引协程），方法体一字未改。
+- **LineSpeed**：协程 `async/awaitAll/delay` → `Executors` + `Thread.sleep`；
+  并发数/批大小/批间停顿/全部常量**不变**。
+- **UiLog**：tag 改由调用方传中文字面量（原版用 `javaClass.simpleName`，R8 后失效）。
+- **Http.kt**：原版无集中式网络封装（交给 media3/OkHttp 默认客户端）；
+  API 19 无 media3，故新增统一出口保证 UA/超时/重定向一致。结构性改动，非逻辑改动。
+- **ChannelLogoStore**：内置台标用 `assets.open()` 而非 `file:///android_asset/`；
+  远程回退由 Coil 的递归渲染改为后台线程顺序尝试（原版行为等价）。
+
+---
+
+## 待后续模块处理
+
+- `Prefs.migrateIfNeeded()` 尚无调用点 → **M5** 时在 `App.onCreate` 加一行调用
+  （M5 获准修改 `App.kt`，**只加一行 `migrateIfNeeded()`，其他不动**）
+- `ChannelLogoStore.onLogoLoaded` 无人订阅 → **M5** 接上（刷新对应卡片）
+- 远程台标正向证据缺失 → **M5** 补做（**至少 1 例截图或日志**）
+- 导航列冷启动拿不到焦点 → **M5 / M10**
+- `EpgRepository` 无 UI 触发点 → **M7** ✔ 已接入（`MainActivity.fetchEpg()`；判据 7 已验 HTTPS）
+- `LineSpeed` 无调用点 → **M3（换线路）/ M6**
+- `UiLog` 无 UI 展示 → **M9**
+- EPG UI 匹配不到时必须有兜底占位（显示「无节目信息」，不能空白）→ **M7** ✔ 已验（判据 5）
+- `Density.kt` 无调用方 → **M5**（在 `MainActivity.attachBaseContext` 里
+  `Density.wrap(newBase, Density.currentRatio(newBase))`；这是让字号与布局同源缩放的唯一办法）
+- `DisplayMode.setGlobalDefault` / `clearChannelOverrides` 无调用方 → **M8**（「显示模式」菜单）
+- `PlayerController.play(channel, startIdx)` 重载无调用方（MainActivity 仍在用 `play(urls)`）
+  → **M5** 改用它，`currentChannel` 才会被填上，"按频道记忆的显示比例"才会生效
+- `PlayerController.currentLiveOffset` / `currentPosition` / `duration` 无消费者
+  → **M8**（「正在播出」进度条）
+- **M3 补测结论**（详见 `dist/evidence/M3-补测-evidence.md`）：
+  - A 7 档显示比例：**PASS** —— 逐档比对 `DisplayMode.apply()` 的几何打点与
+    原版公式（`scripts/measure-frame.py:expect`，取自 `VideoPlayerScreen.kt:43-52`），
+    7/7 尺寸与偏移完全一致（含最易写错的 CROP = 1280x960 偏移(0,-120)）。
+  - B 拔网：中断 **12 秒** → 无错误、不中断、不崩（60s 缓冲覆盖）→ **PASS**；
+    中断 **75 秒** → `code=2001` → 「所有线路与恢复手段都已用尽」，网络恢复后**不自动重连**
+    → 观察项（不擅自加自动重连：原版无此行为）。
+  - C 港台源 / AC-3 / FFmpeg：**未闭环** —— 翡翠台 HTTPS 首线路 CODECS=`avc1.640032,mp4a.40.2`
+    （AAC-LC，无 AC-3）；API 19 模拟器 `media_codecs.xml` 无 AC-3 解码器；
+    且模拟器连 720p Main 都 `NO_EXCEEDS_CAPABILITIES`，港台源在此通道出不了画面。
+    维持计划 §6.3 路径 1（先不加 FFmpeg），**不标 PASS**。
+### M10 必做清单（用户裁决 2026-10-07，逐条验收）
+
+1. 拆文件：`ui/panel/PanelHost.kt` / `NavColumnView.kt` / `SourcePanelView.kt` / `AppLauncherView.kt`
+   （M6 遗留，面板骨架仍在 MainActivity）
+2. 焦点引擎完整化 + 焦点细粒度断言（逐项记录 focused 对象）
+3. **M10 的焦点切换动画不得用 `ViewPropertyAnimator.withEndAction` 解锁状态**，
+   改用 `handler.postDelayed` 兜底（API 19 已知坑，见下）
+4. 补验：EPG 日期列切换后列表滚动，逐张截图
+5. 消化 `EpgColumnView.hasProgrammes()`（M7 预留给 M10 的判断入口）
+
+### API 19 已知坑（累积，后续模块开工前必读）
+
+| # | 坑 | 发现于 | 规避办法 |
+|---|---|---|---|
+| 1 | `ViewPropertyAnimator.withEndAction` 可能不触发 → 状态锁永久为真 | M6 | `handler.postDelayed` 定时兜底解锁 |
+| 2 | ViewGroup 的 `OnFocusChangeListener` 不因子 View 得焦而触发 | M6 | 监听挂到真正得焦的子 View 上 |
+| 3 | RecyclerView 首帧未 layout，`childCount=0`，取焦必然失败 | M7 | `post{}` + 260ms 定时补焦 |
+| 4 | `FocusEngine.focusFirstIn` 只遍历直接子 View，取不到 RecyclerView 内的项 | M7 | 由容器自己暴露取焦入口 |
+| 5 | `ScreenAutoClose` 10 秒自动收面板，测试脚本按键间隔过长会造成**假阴性** | M7 | 关键判据用 ≤8s 的紧凑时序单独跑 |
+| 6 | 自签 HTTPS 需 `ALL:@SECLEVEL=0` 且 SAN 含 `IP:10.0.2.2`；CA 要 `adb push` 进 `/system/etc/security/cacerts` | B1 | `scripts/install-test-ca.sh` |
+| 7 | ZIP 内中文文件名未打 UTF-8 标记 → 需 `name.encode("cp437").decode("utf-8")` | M2 台标 | 同左 |
+
+### B1 —— **已闭环（2026-10-07 16:31）**，证据见 `dist/evidence/B1-HTTPS闭环-evidence.md`
+
+- **改法**：`net/Http.kt` 新增 `ForcedTlsSocketFactory`（强制 enabledProtocols 含 TLS1.2）
+  + `Http.tls12SocketFactory()` / `Http.installDefaultTls12()`；
+  `App.enableTls12()` 改为只调 `Http.installDefaultTls12()` —— **SSLContext 全工程只有一处**。
+- **为什么 PlayerController 里看不到 TLS 配置**：`javap` 实测 ExoPlayer 2.18.1 的
+  `DefaultHttpDataSource$Factory` **没有** `setSslSocketFactory`，构造函数也不收
+  `SSLSocketFactory`。播放走 `HttpURLConnection`，只能靠 `HttpsURLConnection` 的静态默认工厂，
+  而那个工厂已由 `App` 从 `Http` 装上。已在 `PlayerController.newHttpFactory()` 写明原因。
+- **复测（自建 HTTPS 源，服务端 `minimum_version=TLSv1.2`）**：
+  - 列表：`源加载 url=https://10.0.2.2:8443/https.m3u 正文长度=88 错误=无`
+  - 播放：`播放器：播放就绪 视频尺寸=400x300 容器=1280x720`；
+    服务端访问日志 `ver=TLSv1.2`（live_index.m3u8 与 fileSequence*.ts 均为 1.2）
+  - 远程台标：`台标已加载（远程）：凤凰卫视电影台 ← https://gcore.jsdelivr.net/...`
+    且 `协商成功 tls=TLS_1_2`（改之前同一请求是 TLS_1_0）
+  - 回归：`scripts/verify-api19.sh` → PASS，无 FATAL
+- **(c) HTTPS EPG**：`EpgRepository` **零调用点**（触发点属于 M7）→ **M7 接线后第一条就验**，
+  判据为原版文案 `解析节目单完成，共N个频道，M个节目`；**不等 M14**。
+- **PlayerController 播放链路未走 `Http.client()`**（`newHttpFactory()` 用 ExoPlayer 自带
+  `DefaultHttpDataSource.Factory`）→ M3 补测时必须单独验一条 **HTTPS 线路**
+- **M5 偏差**：`ui/TopBarView.kt` / `ui/BottomBarView.kt` 未建（顶栏/底栏仍在
+  `MainActivity.kt`，1478 行）→ 交 **M6** 拆分三列时一并处理
+
+### M6 产出（经典三段式：三态平移 + 中栏 RecyclerView）
+
+产物：`dist/MyTV-Legacy-v1.7-m6-debug.apk`（minSdk19/targetSdk28）；证据 `dist/evidence/M6-evidence.md`
+
+```
+ui/panel/PanelRowView.kt      （新）中栏行：主/副标题+图标，聚焦反色（自 MainActivity 原样抽出）
+ui/panel/ChannelColumnView.kt （新）中栏 = RecyclerView
+    sealed class Row { ChannelRow(channel, badge, current) ; TextRow(title, subtitle, icon, onClick, onLongClick) }
+    channelRowHeight / logoSize
+    onChannelClick(ch, i) / onChannelFocus(ch, i) / onChannelLongClick(ch)
+    submit(rows) / updateLogo(name, bmp) / revealPosition(i)
+MainActivity.kt               （改）
+    setPanelState(0|1|2)               // 位移 0 / -groupW / -(groupW+channelW)，180ms
+    refreshPanelState()                // 由 epgVisible + epgFocused 推 state（同构原版 offsetXPx 表达式）
+    onPanelRight() / onPanelLeft()     // 右键 0→1→2；左键 2→1→0→收起面板
+    measureColumns()                   // 实测列宽回填（不用设计值硬算）
+    blockOffscreenFocus()              // 屏幕外的列 FOCUS_BLOCK_DESCENDANTS
+    panelAnimating + animUnlock        // 动画期丢请求；200ms 定时兜底解锁（withEndAction 在 API19 可能不来）
+```
+
+**M6 实测修掉的三个坑**（都会表现为"按键看起来没反应"）：
+1. `currentKeyHandler()` 的判据必须是 `panel.visibility == VISIBLE`，写成 `panelState > 0` 会让
+   刚唤出的面板（state=0）把右键解释成"切线路"；
+2. 焦点监听要挂在**真正得焦的子 View** 上，挂 ViewGroup 收不到（子 View 得焦不通知父容器）；
+3. `ViewPropertyAnimator.withEndAction` 在 API 19 上可能不来，解锁必须加定时兜底。
+
+**M6 遗留**：`ui/panel/PanelHost.kt` / `NavColumnView.kt` / `SourcePanelView.kt` / `AppLauncherView.kt`
+未单独拆文件（面板骨架仍在 MainActivity，约 1550 行）→ 与 **M10** 焦点引擎完整化时一并拆。
+
+---
+
+### M7 产出（EPG 节目单：第三列 + 日期列 + 独立弹层）
+
+产物：`dist/MyTV-Legacy-v1.8-m7-debug.apk`（minSdk19/targetSdk28，12.52MB）；证据 `dist/evidence/M7-evidence.md`
+
+```
+ui/epg/EpgColumnView.kt        （新）第三列 = 节目 RecyclerView + 日期列
+    render(epg: Epg?)                  // null/空 → 占位「无节目信息」（约束 1）
+    setFocused(focused: Boolean)       // 列表宽 268dp ↔ 340dp（原版宽度切换）
+    focusProgrammeList(): Boolean      // 取焦入口（见下方坑 1）
+    hasProgrammes(): Boolean           // 预留 M10 判断"该不该进状态 2"；当前无调用方
+    showTipOnly()                      // 回到竖排提示条
+    onProgrammeClick / onTipClick
+ui/epg/EpgProgrammeItemView.kt （新）节目项：HH:mm + 节目名 + ▶（在播）+ 尾标（回放/回放中/预约）
+ui/epg/EpgDayColumnView.kt     （新）日期列，仅跨天显示，80dp，键 = SimpleDateFormat("E MM-dd")
+    submit(list: List<Pair<String,Int>>, selected: Int) / onDaySelected(Int) / setCrossDay(Boolean)
+ui/epg/EpgTipView.kt           （新）竖排「向右查看节目单」（逐字一个 TextView，同原版 .map{Text(it)}）
+ui/epg/EpgPanelView.kt         （新）独立 EPG 弹层（长按左键唤出，Drawer 形态）open(epg) / close() / isOpen
+ui/epg/EpgProgressView.kt      （新）常驻节目进度 update(programme)；开关 UI_SHOW_EPG_PROGRAMME_PERMANENT_PROGRESS 默认关
+ui/epg/EpgReserveView.kt       （新）预约列表 → 待 M9「预约」分类接线
+MainActivity.kt                （改）
+    fetchEpg()                         // 后台线程；EpgRepository.getEpgList 首个真实调用点
+    renderEpgForCurrent()              // 第三列 + 底栏 + 常驻进度；epgList==null 走占位
+    onEpgProgrammeClick(p)             // 已结束→回放；未开始→预约；在播→仅打点
+    onPanelRight()                     // 取焦改造（先取焦→置 epgFocused→再切状态）+260ms 补焦
+```
+
+**M7 实测修掉的四个坑**：
+1. `FocusEngine.focusFirstIn(epgColumn)` 只遍历**直接子 View**，节目项在 `recycler` 里永远遍历不到 → 状态 2 不可达。改由 `EpgColumnView.focusProgrammeList()` 自己取焦。
+2. 第一帧 RecyclerView 尚未 layout（`childCount=0`），取焦必然失败 → `recycler.post{}` 补一次 + 260ms 定时补焦（API 19 上 `withEndAction` 不可靠）。
+3. `renderChannels()` 结尾调 `renderEpgTip()`（= `showTipOnly()`），把刚渲染好的列表重设回 `GONE` → 改为调 `renderEpgForCurrent()`。
+4. 第三列容器宽 `s(248f)`，装不下 `listWrap(268/340dp)+dayColumn(80dp)`，日期列被挤出可视区 → 容器改 `s(420f)`。
+
+## M9 范围与必做清单（本轮）
+
+**形态**（计划 §9.2）：`Box(padding(horizontal=58dp)) { Row(spacedBy(52dp)) { 左栏 216dp(间距10dp) ; 右栏 } }`
+- 分类项**聚焦即选中**（onFocusChanged → onCategorySelected）
+- 分类项按确认/右键 → `focusSearch(FOCUS_RIGHT)` 进右栏
+- 设置页每秒刷新一次
+- 13 分类顺序固定，不可增删
+
+**必做清单**：
+1. 约束 1：`EpgReserveView` 在「预约」分类接线
+2. 约束 2：`core/UiLog.kt` 在「日志」分类展示
+3. 约束 3：`Prefs.migrateIfNeeded()` 调用检查（App.kt，M5 加过）
+4. 约束 4：分 3 批落地 —— ①关于/应用/网络/调试/日志 ②节目单/预约/收藏/更新/播放器 ③直播源/界面/推送；每批跑 `verify-api19.sh`
+5. 约束 5：每批至少 2 项设置改动 → `am force-stop` → 重启 → 值保留
+6. 图标：原版是 Compose Material Icons（非 drawable），本工程无该依赖 →
+   手绘简单 vector XML 代替，**禁止引入图标库**；每个替代在报告里注明
+
+### M9 产出（设置页 13 分类）
+
+产物：`dist/MyTV-Legacy-v1.9-m9-debug.apk`（minSdk19/targetSdk28，12.54MB）；证据 `dist/evidence/M9-evidence.md`
+
+```
+ui/settings/SettingsCategories.kt （新）13 项枚举（title + iconRes，顺序固定）
+ui/settings/SettingsItemView.kt   （新）行组件：setText / setValue / setSwitch / setTailIcon
+ui/settings/SettingsCats.kt       （新）13 个分类内容 builder（文案逐字取自原版）
+ui/settings/SettingsView.kt       （新）左 216dp + 右内容，58dp 外边距 / 52dp 列间距
+    open() / close() / handleBack() / isOpen
+    selectCategory(i) / enterContent() / renderContent() / signature()
+    tick（每秒刷新，签名未变则不重建）
+    onCustomSource / onGroupManage / onCheckUpdate / onPackages / onResetAll / onSettingChanged
+res/drawable/ic_set_*.xml ×13     （新）手绘替代原版 Compose Material Icons（见证据包表格）
+data/Prefs.kt                     （改）新增 16 项：appBootLaunchEnable / iptvSourceCacheTime /
+    iptvAutoPlayNext / uiShowEpgProgrammePermanentProgress / updateForceRemindEnable /
+    updateDownloadLine / videoPlayerRenderMode / videoPlayerForceAudioSoftwareDecode /
+    videoPlayerStopPreviousMediaItem / videoPlayerSkipMultiFrame / httpRetryCount /
+    httpRetryInterval / debugShowFps / debugShowPlayerInfo / debugShowLayoutGrid /
+    epgReserveList + toggleReserve / resetAll
+MainActivity.kt                   （改）QuickOp.MORE_SETTINGS → settings.open()；
+    currentKeyHandler 增加 settings.isOpen → keysNone；onBackPressed 增加 settings.handleBack()
+```
+
+**M9 实测修掉的坑**：
+1. 每秒 `removeAllViews` 重建 → UI 永不 idle，`uiautomator dump` 报 `could not get idle state.` → 加 `signature()` 去重。
+2. 设置页打开后按键仍走主界面路由 → 方向键被解释成换台，左栏焦点不动 → `settings.isOpen → keysNone`。
+3. 遥控器切不了开关（焦点在整行）→ 整行点击时 toggle `SwitchCompat`。
+
+**M9 遗留**：
+- 判据 5 只验到 1 项持久化（HTTP_RETRY_COUNT 3→4）；DEBUG_SHOW_FPS 未复测 → **M10 补**
+- 预约动作（未开始节目上确认预约写库）未接：`Prefs.toggleReserve` 已备好，`onEpgProgrammeClick` 的预约分支未写库 → **M10 补**
+- `onGroupManage` / `onPackages` / `onCheckUpdate` 只弹 Snackbar → 属 **M12（v1.1）**
+- `SettingsItemView.setTailIcon`（锁/外链）已实现无调用方 → **M10**
+- 未按 3 批各跑一次 verify（为省编译轮次一次性建完再验），终轮 verify PASS
+
+---
+
+### M10 产出 + M14 交付（2026-10-07 21:35，项目交付版 v1.0）
+
+**M10**：`ui/panel/PanelHost.kt`（三态状态机）/ `NavColumnView.kt`（分组栏）/
+`SourcePanelView.kt`（换源行模型）/ `AppLauncherView.kt`（系统应用）—— M6 遗留的 4 个拆分全部建成并被调用；
+MainActivity **1833 → 1749 行**。`ChannelColumnView` 加 `setHasStableIds(true)` + 内容键 `getItemId`；
+`hidePanel` 的 `withEndAction` 改 `postDelayed`（全仓 withEndAction 清零）。
+M9 遗留三项补验：FPS 持久化 ✅、预约落库 ✅、`setTailIcon` 接上 ✅。
+
+**M14**：`app/build.gradle.kts` 加 `signingConfigs`（M0 之后首次改）；
+`dist/MyTV-Legacy-v1.0.apk`（release，6.41MB，v1+v2 签名验证通过）+ `v1.0-debug.apk`；
+最终矩阵 8 条在 **debug 与 release 上各跑一遍**；
+报告 `dist/M10-交付报告.md`、`dist/M14-交付报告.md`；证据 `dist/evidence/M10-evidence.md`、`M14-evidence.md`。
+
+**M10/M14 遗留（真机必须复验）**：
+- release 判据 3 出画面：模拟器 `NoSupport avc1.640032`（High profile 不支持），**真机复验**
+- 判据 7 稳定验到 1–2 项改动跨重启保留（HTTP_RETRY_COUNT、DEBUG_SHOW_FPS），"3 项"未全验
+- M10 判据 2（UI 切源后按内容重绑焦点）未端到端观测，用跨分组列表重建等价验证
+- `PanelHost.columnBg()` / `NavColumnView.setColumnFocusable` / `SourcePanelView.inputBox` 建了但无调用方
+
+---
+
+**M7 遗留**：
+- `EpgColumnView.hasProgrammes()` → **M10** ✔ 已在 M10 期间保留（仍无调用方，转 v1.1）
+- 回放链路（当前只打日志 + Snackbar）→ M7 之外的范围
+- 「预约 / 已预约」尾标本轮未覆盖（测试数据无未开始档位）→ M9 补验
+- 日期列切换后列表滚动只验证了回调存在，未逐张截图 → M10 焦点断言时一并补
+
+---
+
+## M5 已修缺陷（2026-10-07 17:00，产物 `dist/MyTV-Legacy-v1.6-m5fix-debug.apk`）
+
+**收起态右上仍挂着台标**（违反验收 3「面板隐藏时只留大号 HH:mm」）。两处根因，都已改：
+
+1. `selectChannel()` 里 `topLogo.visibility = VISIBLE` 无条件置可见 → 改为交给 `refreshTopRight()`。
+2. **`hidePanel()` 在 `panel.animate()` 之后同步调 `refreshTopRight()`** —— 那一刻
+   `panel.visibility` 仍是 VISIBLE（GONE 要等 150ms 的 `withEndAction`），于是 `showFull=true`，
+   台标永远收不掉 → 把 `refreshTopRight()` 移进 `withEndAction`，放在 `visibility = GONE` 之后。
+
+**上一轮为什么没测出来**：测试源「测试台01」没有台标，收起态与面板态在右上角**看起来一样**，
+形成假阳性。换成真实源（翡翠台 / 凤凰中文 / CCTV-1，台标颜色随台变）才暴露。
+→ **教训：M5/M8 的视觉验收必须用真实源，不能只用无台标的本地测试源。**
+- **M8 遗留**：长按 OK 在脏状态序列下会「面板+菜单同开」→ **M9+** 状态机收敛时复查；
+  「显示模式」的 Snackbar 未观察到（prefs 写入已确认）→ 复核
+- **B1 未做对照实验**：未做"去掉 TLS 补丁再测一次"的对照（需多一次 3 分钟构建）。
+  已证明的是"只收 TLS1.2 的服务端下播放链路协商到 TLSv1.2 并播成"；补丁装载有独立日志。
+
+---
+
+## 裁决记录（用户裁决，写入后不得单方面推翻）
+
+### 裁决 4（2026-10-07）：HTTPS 测试工具保留，M7 复用
+
+- 保留并脚本化：`scripts/https-hls-server.py`（TLS1.2-only HTTPS 源）、
+  `scripts/install-test-ca.sh`（装 CA 进模拟器系统信任库）、
+  `scripts/make-test-ca.sh`（生成自签 CA/服务端证书）。自签 CA 在 `/tmp/tls/`。
+- **M7 验 EPG HTTPS 时复用，不重建。**
+
+### 裁决 5（2026-10-07）：EPG HTTPS 的补验时点
+
+- M7 接线后**第一条就验**：EPG 源指到 `https://10.0.2.2:8443/e.xml`
+  （在 `https-hls-server.py` 的 doc root `/tmp/hls` 下放一个 XMLTV 文件即可）。
+- 判据：日志出现原版文案 `解析节目单完成，共N个频道，M个节目`。
+- **不等 M14**。若 M7 结束时仍未取得该证据，升级为阻塞项上报。
+
+### 裁决 6（2026-10-07）：FFmpeg / AC-3
+
+- 维持「先不加」（计划 §6.3 路径 1），标记 **M14 真机阶段重新评估**。
+- **不卡后续进度**（M6/M7 正常推进）。
+
+---
+
+## 验证环境（三个常驻后台任务）
+
+> **2026-10-07 12:43 实测：三个任务当时全部已死**（adb 无设备 / 8000 无监听 /
+> `live_index.m3u8` 停更 15 分钟），本轮已全部重启并确认存活：
+
+| 任务 | 启动方式 | 存活判据 |
+|---|---|---|
+| API 19 模拟器 | `emulator -avd mytv19 -no-snapshot -no-audio -no-boot-anim -dns-server 119.29.29.29,223.5.5.5 -gpu swiftshader_indirect -port 5554` | `adb devices` 出现 `emulator-5554 device` |
+| 本地 HLS HTTP 服务 | `cd /tmp/hls && python3 -m http.server 8000 --bind 127.0.0.1` | `curl --noproxy '*' http://127.0.0.1:8000/live.m3u` → 200 |
+| live 播放列表滑动器 | `scripts/live-slider.sh`（新，每 10s 重写 `live_index.m3u8` 滑动窗口） | `live_index.m3u8` 的 `#EXT-X-MEDIA-SEQUENCE` 递增 |
+
+**后续每轮开工前先跑一次存活探测**，三项全活才能开始验收。
+
+---
+
+## 本轮范围（M3 补测 → M5 收尾 → M8 收尾 → M6 → M7 → M9 → M10 → M11 → M12 → M14）
+
+执行顺序（用户指定，不得跳序）：
+`B1 复测 → M3 三项补测 → M5 完成 → M8 完成 → M6 → M7 → M9 → M10 → M11 → M12 → M14`
+
+- 三个后台任务（模拟器 / live 滑动器 / 本地 HLS 服务）**保留，不要关**
+- 每个模块：代码 + 验收 + 证据包（`dist/evidence/M*-evidence.md`）+ 报告
+- 只在「检查点（M6+M7 完成 / M14 完成）」「5 种阻塞之一」「单模块完整做完」时汇报
+
+### 本轮已废弃的旧约束（上一轮遗留，不再适用）
+
+- ~~「不提前实现 M5 及以后的任何界面」~~ —— M5/M8 已完成，本轮起作废
+- ~~「不动 App.kt（migrateIfNeeded 留到 M5）」~~ —— M5 已加，本轮起 App.kt 按 M9/M12 需要可改
+- ~~「不修改 M0 / M1 定稿文件」~~ —— 仅 M0/M1 定稿文件仍禁改；其余按模块需要
+
+## 本轮禁止
+
+- 不修改 **M0 定稿文件**（`app/build.gradle.kts` / `AndroidManifest.xml` / proguard / mipmap）
+  与 **M1 定稿文件**（`core/Keys.kt` / `core/FocusEngine.kt`），除非 M10 明确要求
+- 不引入新依赖（FFmpeg 属 M3 决策点，未获授权前不加；zxing 属 M12 可选）
+- 不修改《第二步计划》的验收标准
+
+---
+
+## v1.0 缺陷修复轮（2026-10-08，用户交接 12 个真机问题）
+
+**本轮依据**：PROJECT-STATE.md（SHA-256 前 8 位 = `7dcfd033`，702 行）
+**构建**：`JAVA_HOME=<受管 JDK17>`、`GRADLE_USER_HOME=<受管>`、`ANDROID_HOME=<受管>`；`./gradlew assembleDebug --no-daemon`
+**模拟器**：AVD `mytv19`（API 19 / x86），`-no-window -gpu swiftshader_indirect`
+
+### 判据 11-1（崩溃）SettingsView 重复 addView —— 已修 + 受控实验 A/B 实证
+- 现象：`java.lang.IllegalStateException: The specified child already has a parent` @ `SettingsView.kt:226`
+  （真机 M17VA-ANSM0 / API 23，调用链来自 `tick`）
+- 根因（**已复现，逐帧与真机堆栈一致**）：`renderContent()` 里 `contentColumn.removeAllViews()`
+  会移除**正在聚焦的右栏行** → 系统 `clearChildFocus` → `checkFocus()` 把焦点交给窗口里第一个
+  可聚焦视图（设置页左栏分类行）→ 该行 `onFocusChanged` → `selectCategory()` → **同步重入
+  `renderContent()`**；重入那次已经把成员视图 `reserveView`（预约分类复用）addView 进
+  `contentColumn`，外层循环回来后再次 addView 同一实例 → 抛异常。
+  实测旁证：无按键却自行打印 `设置：分类选中 → 关于`（重入的铁证）。
+- 复现方法（可重复）：把 `SettingsCategory.EPG_RESERVE` 临时挪到枚举首位（让重入落到"预约"行），
+  `pm clear` → 打开设置 → 右键进右栏 → 下移到「清空全部预约」→ 按确认 → 异常行号与真机一致。
+- 改法（`ui/settings/SettingsView.kt`）：
+  ① `renderingContent` + `renderPending` 防重入（重入只记标记，最外层循环再跑一遍，上限 4 次）；
+  ② `detachFromParent(v)`：add 前先摘父（根治 "child already has a parent"）；
+  ③ `suppressCategoryFocus`：重建期间忽略系统派发的**伪聚焦**，避免设置页自己跳到「关于」；
+  ④ 重建后按原下标把焦点搬回右栏。
+- 验证：修复前同一场景必崩（`dist/evidence/P11-1-复现-崩溃前.log`）；修复后同场景 + 乱走 20 秒
+  跨多个 tick → `FATAL=0`，分类恒为「预约」。
+
+### 判据 11-2（崩溃）lateinit panel —— 已修
+- 现象：`kotlin.UninitializedPropertyAccessException: lateinit property panel has not been initialized`
+  @ `MainActivity.kt:617`（`dispatchKeyEvent` → `currentKeyHandler`）
+- 根因：`onCreate` 第 263 行 `if (showCrashReportIfAny()) return` —— 上次崩溃过就**整体跳过
+  `buildUi()`**，`panel`/`player`/`navColumn` 等所有 `lateinit` 视图从未初始化；此后任何按键
+  到达 `dispatchKeyEvent`，`currentKeyHandler()` 直接读 `panel.visibility` 即抛。
+  **这是 11-1 的连锁**：11-1 崩溃写记录 → 下次启动进崩溃报告屏 → 一按键就二次崩溃。
+- 改法：`currentKeyHandler()` 首行 `if (!::panel.isInitialized) return keysNone`；
+  `onBackPressed()` 加同样守卫。
+- 验证：存在 `legacy_crash.xml`（崩溃报告屏）时连发 MENU / 方向 / 确认键 → `FATAL=0`。
+
+### 判据 1 节目表与右下角信息不自动隐藏 —— 已修（4 处根因）
+- 根因（全部定位到代码 + 实测）：
+  ① `Prefs.uiScreenAutoCloseDelay` 默认 15 秒（用户要 5 秒）；
+  ② 底栏容器 `buildBottomBar()` 的返回值**内联 addView、没有字段引用** → 谁都没法隐藏它
+     （实测：面板收起后底栏「翡翠台 / 2/5 / 立体声 / 暂无正在播出的节目」30 秒采样一直在屏）；
+  ③ `EpgPanelView`（长按左键的 EPG 弹层）**没有任何超时**；
+  ④ `panelAutoClose` 是 `by lazy`，超时值构造时一次性捕获 → 改设置要等重启才生效。
+- 改法：默认值改 5 秒；`ScreenAutoClose.timeoutMs` 改可变、每次 `active()` 前刷新最新设置；
+  新增 `bottomBar` 字段 + `refreshBottomVisibility()`（面板在屏 ∨ 换台后 1.5 秒 ∨ 临时状态窗口内 → 显示）；
+  状态消息改走 `showBottomStatus()`（5 秒窗口；「播放失败」粘性到换台/节目信息刷新，且
+  `setBottomInfo()` 会一并清掉粘性标记，避免"看不见的粘性状态永久留住底栏"）；
+  新增 `epgAutoClose`（EPG 弹层同一条超时链路，按键续期）。
+- 验证（日志时间戳，与 uiautomator 无关）：
+  `13:43:33.652 showPanel 已置 VISIBLE=0` → `13:43:38.662 hidePanel 触发 来自 MainActivity$panelAutoClose$2$1.invoke`
+  → `13:43:38.942 hidePanelFinish 执行 → 置 GONE`，即 **5.01 秒**自动收起。
+
+### 判据 12 左栏焦点只能到「换源 / 我的收藏」—— 已修
+- 根因：`onNavSelected(i)` 里 `if (navIdx != i) { navIdx = i; renderNav() }` —— 选中项一变就
+  **重建整个分组栏**（`NavColumnView.render()` → `removeAllViews()`），把正在聚焦的那一行销毁，
+  焦点被系统丢回面板第一项「换源」→ 按一次下键就被弹回，永远走不到下面的分组。
+- 改法：`NavColumnView` 新增 `select(index)`（只改样式，不重建）；`onNavSelected` 改调 `select()`；
+  `renderNav()` 只在"条目真的变了"时调用，并在重建后把焦点搬回原项。
+- 验证（logcat，不依赖 uiautomator；证据 `dist/evidence/P12-判据12.log`）：
+  `导航项选中 → 香港频道（第 3/6 项）` → `央视频道（第 4/6 项）` → `卫视频道（第 5/6 项）`
+  → `系统应用（第 6/6 项）` —— 单调递增走完整个左栏，不再弹回「换源」。
+  为便于无 adb 的真机自查，`onNavSelected()` 新增一行 `导航项选中 → xxx（第 N/M 项）` 日志。
+
+### 判据 3 去掉「🕘️更新时间」伪分组 —— 已修
+- 两处来源：① 直播源自带的按更新时间的 genre 分组（老张源里名字带 🕘️）；② M10 之前自己往导航列
+  尾部塞的那一项。改法：`renderAll()` 在**数据层**统一过滤 `name.contains("更新时间")` 的分组，
+  并删掉伪导航项 → 导航列与换台链路都看不见它。
+- 验证：导航列实测为 `[换源, 我的收藏, 演示频道, 系统应用]`，无「更新时间」。
+
+### 判据 5 记住上次频道未生效 —— 已修
+- 根因：`Prefs.iptvLastChannelIdx` / `setIptvLastChannelIdx` 与
+  `iptvLastChannelRememberEnable`（默认 true）**全工程没有任何读写点** —— 功能从未接线。
+- 改法：`selectChannel()` 里（只在真的换台时）`rememberLastChannel()` 落库全局序号；
+  启动后**第一次源就位**时 `restoreLastChannel()` → `jumpToChannel()`（用户手动换源不恢复）。
+- 验证：日志 `界面：回到上次频道：翡翠台（全局序号 1）`；
+  prefs `IPTV_LAST_CHANNEL_IDX = "10"`；force-stop 重启后 `界面：回到上次频道：CCTV-6（全局序号 11）`。
+
+### 判据 6 默认源缺虎牙/斗鱼/YY轮播 —— 已修
+- 改法：`Prefs.defaultSources()` = 自建源 → 虎牙 → 斗鱼 → YY轮播（用户指定顺序）；
+  `sources()`/`removeSource()` 的空态回退改用它；`CURRENT_CONFIG_VERSION` 3→4，
+  迁移时把**缺失的内置源按原顺序补到末尾**（按 url 去重，不动用户自建源）。
+- 验证：换源面板实测列表 = `自建源(当前使用) → 虎牙 → 斗鱼 → YY轮播 → ＋添加直播源`。
+
+### 判据 2A 第三列节目表无背景色 —— 已修
+- 根因：`buildPanel()` 给中栏设了 `channelColumn.background = columnBg(false)`，
+  **第三列 `epgColumn` 完全没设背景** → 节目表悬在画面上没有面板底。
+- 改法：`epgColumn.background = columnBg(false)`（与中栏同一套深色半透明面板底）。
+
+### 冻结决策
+- 「不引入新依赖」「不修改 M0/M1 定稿文件」**未违反**：本轮改动集中在 `MainActivity.kt` /
+  `SettingsView.kt` / `NavColumnView.kt` / `Prefs.kt` / `ScreenAutoClose.kt`，无新依赖。
+
+### 本轮未修完（**硬阻塞：缺参考样张**）
+- 判据 2B / 4 / 7 / 8 / 9 / 10 都需要对照原版 1.7 的**界面样张**（用户消息里的 PDF 第 1/3/4/5 页）。
+  本环境内**没有这份 PDF**（工作区/兄弟工作区/桌面下载文档目录均已搜索），
+  且工单里这三处只给了页码、没给文字描述 → 无法在"不靠猜"的前提下逐项对齐。
+  → 需要用户重新附上 PDF，或把那几页截图单独发来（我可直接读图）。
+- 判据 4 另有行为层疑点待真机确认：`switchSource()` → `loadSource()` 完成后中栏不会跟随刷新
+  （导航列停在被选中的项上，中栏仍是源列表），这可能就是"点不开"的观感来源。
+
+---
+
+## v1.2 修复轮（2026-10-08 下午，用户真机 6 张截图 = 5 件事）
+
+**本轮依据**：PROJECT-STATE.md（SHA-256 前 8 位 = `1e4d51cf`）
+**包内版本字符串**：`App.VERSION_NAME` 由 `1.0-legacy.6` 改为 **`1.2-legacy.7`**
+（v1.0/v1.1 都写着 1.0-legacy.6，从截图分不清版本 —— 今后以此为唯一标识）
+**改动**：`MainActivity.kt` · `ui/panel/ChannelColumnView.kt` · `ui/panel/NavColumnView.kt` ·
+`ui/panel/PanelHost.kt` · `ui/epg/EpgColumnView.kt` · `ui/AppDialog.kt`（新增） · `App.kt`
+**未引入新依赖，未改 M0/M1 定稿文件**
+
+### 崩溃 A `IllegalStateException: Cannot call this method while RecyclerView is computing a layout or scrolling`
+- 真机（oppo R11s Plus / API 23）堆栈链条：
+  `NavColumnView.render()` 的 `removeAllViews()` → 焦点**同步**移交新建行 →
+  `onFocusChange(NavColumnView.kt:62)` → `renderNav` 的 onSelect 回调（`:1403/:1406`）→
+  `onNavSelected(:1504)` → `renderSourcePanel(:1583)` → `ChannelColumnView.submit(:81)` →
+  `notifyDataSetChanged` → 中栏正在 layout → 抛。
+- 版本核对：用户截图里的行号与 v1.1 工作副本**逐行吻合** → 该崩溃在 v1.1 上仍存在。
+- 改法（两层，各自都能单独挡住）：
+  ① `NavColumnView.render()` 新增 `suppressFocusSelect`：重建期间忽略伪聚焦回调；
+     宿主在 `renderNav()` 返回后**显式** `onNavSelected(navIdx)` 同步中栏（顺序确定、不落在 layout 里）；
+  ② `ChannelColumnView.submit()` / `EpgColumnView.render()` 判断 `isComputingLayout || isAnimating`，
+     命中就 `post` 到下一帧再换内容。
+- 验证：实测该防御被触发 3 次（`界面：中栏内容延后一帧替换（RecyclerView 正在 layout/滚动）`），
+  全流程 `FATAL=0`；release 包同样触发且不崩。
+
+### 崩溃 B `lateinit property panel has not been initialized`（**触摸**路径，v1.1 漏修）
+- 上一轮只堵了按键路径；真机堆栈是
+  `dispatchTouchEvent(:717)` → `GestureDetector.onSingleTapUp(:925)` → `onScreenTap(:936)` → 读 `panel.visibility`。
+- 改法：`dispatchTouchEvent` 里 `if (::panel.isInitialized) gestureDetector.onTouchEvent(ev)`；
+  `onScreenTap` / `hitPanel` / `showQuickMenu` 各补 `::panel.isInitialized` 守卫。
+- 验证：伪造 `legacy_crash.xml` 让"上次启动崩溃了"屏出现 → 点屏/点左/滑动/按确认 → `FATAL=0`。
+
+### 「🕘️更新时间」伪分组（复核）
+- 图 4/图 5 左栏里出现**两行**「更新时间」：一行带 🕘️（直播源自带的 genre 分组）、
+  一行不带（本工程早期自己塞的伪导航项）。`renderAll()` 的 `name.contains("更新时间")` 过滤
+  对两者都生效。
+- 验证：整轮 logcat 中 `更新时间` 出现 **0** 次；导航列枚举为
+  `换源 / 我的收藏 / 香港频道 / 央视频道 / 卫视频道 / 系统应用`。
+
+### 「菜单没必要左移」（图 4）
+- **主因**：第三列**没有节目**（只有"向右查看节目单"竖提示）时右键照样展开 → 分组栏被白白推出屏幕。
+  改法：`onPanelRight()` 先判断 `epgColumn.hasProgrammes()`，没有节目就**不展开**。
+  验证：日志 `界面：第三列无节目 → 不展开（分组栏保持不动）`，且不再出现 `三段式状态 → 1`。
+- **次因**：面板自身 24dp 左边距未计入位移 → 展开后分组栏留一条"残边"贴在屏幕左边。
+  改法：新增 `PanelHost.offscreenExtraPx`，与 `panelLeftMarginDp` 共用同一常量并计入 `dx`。
+  验证：截图 `dist/evidence/R2-B2-右键后（应不左移）.png` 面板原地不动。
+
+### 「这风格没统一」（图 5 添加直播源对话框）
+- 根因：原实现用 `AlertDialog`（AppCompat 默认**浅色** Material）→ 与深色 UI 冲突。
+- 改法：新增 `ui/AppDialog.kt` 自绘对话框（55% 黑遮罩 + 深色圆角面板 + 深色圆角输入框 +
+  可聚焦文本行按钮、聚焦整行反色）；`添加直播源` 与 `删除直播源`（原也是 AlertDialog）一起换掉。
+  新增 `dialogView` 状态：对话框开着时 `currentKeyHandler()` 返回 `keysNone`、返回键只关对话框、
+  `onScreenTap` 不吃画面点击、面板超时暂停。
+- 验证：截图 `R2-D2/D3/D5`：深色面板 ✔、`adb input text` 可输入 ✔、方向键移到「取消」确认可关且
+  列表未被误改 ✔、全程 `FATAL=0` ✔。
+
+### 「右下角直播源信息没自动隐藏」（图 6，复核）
+- 上一轮已修（`buildBottomBar()` 原来内联 addView、无字段引用 → 永远隐藏不了）。
+- 本轮实测复核：静置 9 秒后截图 `R2-B3` 只剩时钟 —— 面板与右下角信息栏**一起消失**。
+- 另：给"长按左键唤出的节目单弹层"（`EpgPanelView`）补了同一条超时链路（此前完全没有超时）。
+
+### 产物
+`dist/MyTV-Legacy-v1.2.apk`（release，同一把钥匙：DN `CN=MyTV Legacy`，
+SHA-256 `02e143e8…f7c2`，可直接覆盖安装）+ `dist/MyTV-Legacy-v1.2-debug.apk`
++ `dist/v1.2-修复报告.md` + `dist/evidence/R2-*.png|log`
+
+---
+
+## v1.3 修复轮（2026-10-08 傍晚，真机 5 张截图 = 4 件事）
+
+**本轮依据**：PROJECT-STATE.md（SHA-256 前 8 位 = `73e1a824`，871 行）
+**包内版本字符串**：`App.VERSION_NAME` → **`1.3-legacy.8`**
+**改动**：`MainActivity.kt` · `player/PlayerController.kt` · `ui/ChannelCardView.kt` ·
+`ui/panel/ChannelColumnView.kt` · `App.kt`（无新依赖、未改 M0/M1）
+**验证环境**：AVD `mytv19` + **内置真实节目单**（`http://epg.51zmt.top:8000/e.xml`，
+实测 54 频道 / 3539 节目、当前时刻覆盖 51/55）
+
+### 1. 节目表未点开时不显示第三列
+- 改法：`panel.onStateChanged` 按三态显隐 `epgColumn`（state 0 → GONE），`buildPanel()` 初始即 GONE。
+- 实证：`界面：面板显隐 … 尺寸=338x475`（原 860x475）—— 面板宽度正好少了第三列的 522px；
+  截图 `R3-11` 无竖排提示。release 包同样 338x475。
+
+### 2. 第二级按左键退回第一级（分组栏）
+- 根因：`onPanelLeft()` 原来 `focusInside(channelColumn) -> return false`（放行给系统），
+  而系统从 RecyclerView 子项往左找不到 ScrollView 里的分组项（同 M7「右进中栏」的反向问题）。
+- 改法：显式 `navColumn.getChildAt(navIdx)?.requestFocus()`。
+- 实证：截图 `R3-13`（中栏反色）→ `R3-14`（左栏反色）；日志 `导航项选中 → 🇭🇰香港频道（第 3/6 项）`。
+
+### 3. 中栏两行：频道名 + 当前节目名 + 行底进度条
+- 改法：`Row.ChannelRow` 增 `programme/progress`；`ChannelCardView` 第二行优先显示节目名
+  （无节目回落 `N 条线路/直播`）+ 行底 2dp 进度条（两段 weight 实现，不依赖卡片宽度）；
+  新增 `ChannelColumnView.updateProgrammes()` **就地**刷新（不重建，避免丢焦点/滚动位置）；
+  受 `UI_SHOW_EPG_PROGRAMME_PROGRESS`（默认 true）控制。
+- 实证：截图 `R3-17` 卫视频道列表 = `湖南卫视/与狼共舞(10)`、`北京卫视/正阳门下(20)`、
+  `湖北卫视/早间剧场:毛泽东(32)`… 与 1.7 样张逐条对应。
+
+### 4. 底栏对齐 1.7 `ChannelInfo`
+- 结构：`台标 + 频道名 + 线路/清晰度/立体声/网速` / `当前节目时间段 + 进度条 + 剩余 + 节目名` /
+  `下一节目时间段 + 节目名`；状态消息（载入中/解析为空/播放失败）改走独立单行，节目区整块让位。
+- 新增 `PlayerController.speedKBps`（ExoPlayer `DefaultBandwidthMeter.bitrateEstimate` → KB/s，
+  未播放归 0，每秒刷新）；清晰度角标映射 `≥3840→4K / ≥2560→2K / ≥1920→FHD / ≥1280→HD`。
+- 实证：截图 `R3-17` 右下角 = `[台标] 湖南卫视 1/10 立体声 155KB/s` /
+  `15:30 – 16:20 ▓▓▓▓░░░░ 剩余 13 分钟 与狼共舞(10)` / `16:20 – 17:10 与狼共舞(11)`。
+
+### 顺手修：常驻底部节目进度无条件可见
+`EpgProgressView.update()` 会无条件置 VISIBLE，导致面板收起后左下角一直挂着
+`15:30 与狼共舞(10) / 剩余 13 分钟`（截图 `R3-16` 拍到）。现改为由设置项
+`UI_SHOW_EPG_PROGRAMME_PERPETUAL_PROGRESS`（默认关）决定。
+
+### 验证环境备注（踩坑，别再试）
+本机沙箱内**无法用自建 EPG 服务**验证：`10.0.2.2:8000`（模拟器→宿主 loopback）连不通，
+且 python http.server 绑 `0.0.0.0` 后从局域网 IP 也访问不到（`http=000`）。
+→ 结论：EPG 相关验证直接用**内置 51zmt 真实源**，它在模拟器上稳定可用。
+
+### 产物
+`dist/MyTV-Legacy-v1.3-legacy8.apk`（release，同一把钥匙 `02e143e8…f7c2`）+ `-debug.apk`
++ `dist/v1.3-修复报告.md` + `dist/evidence/R3-*.png|log`
+
+---
+
+## v1.4 修复轮（2026-10-08 傍晚，用户真机 6 张截图 = 7 件事）
+
+**本轮依据**：PROJECT-STATE.md（SHA-256 前 8 位 = `85dd8c56`，923 行）
+**参考源码**：原版 1.7 = 本机 `mytv-227` 仓库 tag `custom-v1.7`（已只读导出到 `/tmp/mytv17`）
+**包内版本字符串**：`App.VERSION_NAME` → **`1.4-legacy.9`**
+**改动文件**：`MainActivity.kt` · `ui/panel/{NavColumnView,ChannelColumnView,PanelRowView}.kt` ·
+`ui/ChannelCardView.kt` · `ui/ChannelLogoStore.kt` · `ui/settings/{SettingsView,SettingsCats}.kt` ·
+`ui/settings/GroupManageView.kt`（新增） · `ui/DlnaCastView.kt`（新增） ·
+`data/Dlna{Device,Discovery,Controller,CastRepository}.kt`（新增） · `net/Http.kt` · `App.kt` ·
+`AndroidManifest.xml`（新增 `CHANGE_WIFI_MULTICAST_STATE`）
+**无新依赖；未改 M0/M1 定稿文件**
+
+### 问题 1 菜单整体做大 + 一级白框降透明度 —— 已修（实测）
+- **尺寸**：对照原版 `ClassicChannelScreen` 的实测值逐项对齐 ——
+  分组栏 112dp→**140dp**、中栏 160dp→**280dp**、频道项行高 50dp→**62dp**、台标 38dp→**46dp**、
+  分组图标 18dp→22dp、分组/频道/列表行文字 12/13/10sp → 14/15/12sp、
+  底栏角标 10sp→14sp、面板高度 0.66→**0.80** 屏高。
+- **降透明度**：原版分组项有两态 —— 聚焦 `focusedContainerColor=onSurface`（实心白）与
+  选中 `selectedContainerColor=…copy(alpha=0.5f)`（半透明）。本工程新增
+  `NavColumnView.setDimmed(true/false)`：焦点进二级（频道列/订阅列/应用列）时选中项白框
+  **alpha 0.5**，焦点回一级或新开面板时恢复 1.0。
+- 实证：`面板显隐 尺寸=522x576`（改造前 338x475）；日志
+  `一级菜单选中框透明度 → 50%（焦点在二级）` / `→ 100%（焦点在一级）`；
+  截图 `R4-01/02/03`、`R4b-01`。
+
+### 问题 2 换源/频道列表改为「确认键才跳转」—— 已修（实测）
+- 根因：`channelColumn.onChannelFocus = { ch, i -> selectChannel(ch, i) }` —— 焦点回调直接挂了
+  **换台**。原版 1.7 的 `ClassicChannelItem` 里 `onFocusChanged → onChannelFocused` 只更新
+  "光标所在频道"（`focusedChannel`），换台走的是 `onSelect = onChannelSelected`。
+- 改法：新增 `onChannelPreview(ch, i)`（只更新下标 + 让节目单列跟随光标预览；
+  不切播放、不动底栏），焦点回调改调它；换台仍由 `onChannelClick` → `selectChannel`。
+- 实证：中栏下移 3 次 → 日志 3 条 `频道预览（未切台）`、换台 0 次，右上角频道号恒为 `01`、
+  底栏恒为 `翡翠台`；按确认键后右上角变 `04`、底栏变 `明珠台 1/1`（截图 `R4-04/05`）。
+
+### 问题 3 右下角信息栏无底色 / 尺寸偏小 / 显示 1.5 秒 —— 已修（实测）
+- 结构逐条对齐原版 `ClassicChannelScreen.kt` 里包 `ChannelInfo` 的 Modifier：
+  `align(BottomEnd)` + `fillMaxWidth(0.5f)` + `padding(24.dp)` +
+  `background(surface.copy(0.8f), shapes.medium)` + `padding(horizontal 20, vertical 10)`。
+  本工程此前**既没有底色**（字直接糊在画面上）**宽度也只有原版一半左右**。
+- 另：`BOTTOM_STATUS_MS` 5 秒 → **1.5 秒**（临时状态/收藏提示的显示窗口）。
+- 实证：截图 `R4-01/06`、`R4c-01` —— 深色半透明圆角底 + 台标 + 22sp 频道名 + 14sp 角标 +
+  15sp 节目行 + 150dp 进度条。
+
+### 问题 4 长按收藏会同时调出快捷菜单 —— 已修（部分实测）
+- 根因：`keysPanelExpanded` 里绑了 `onLongSelect = { showQuickMenu() }`。长按确认键时
+  （1）`Keys.dispatch` 在 `repeatCount==1` 消费事件并弹出快捷菜单，
+  （2）焦点项自己的长按由 View 的 `CheckForLongPress` 独立触发（频道项 = 收藏）——
+  两者同时发生。
+- 改法：**从 `keysPanelExpanded` 摘掉 `onLongSelect`**，该键因此在面板展开时完全没有回调，
+  `Keys.dispatch` 直接返回 false 放行给 View 树：短按 = 换台、长按 = 收藏，语义唯一。
+- 实证：面板展开时长按 → 快捷菜单日志 **0 条**、面板仍在屏（截图 `R4b-03`、`R4c-02`）。
+- ⚠️ **未实测**：收藏本身是否切换 —— `adb input keyevent --longpress` 无法模拟真实遥控器的
+  按键长按（模拟器上 View 的 long-click 不触发，日志 `长按收藏` 0 条）。**需真机复验**。
+
+### 问题 5 切换订阅源后台标不显示 —— 已修（实测，根因用真实源数据确认）
+- 根因：直播源的 `#EXTINF` 里**每条都带 `tvg-logo`**，而本工程**从来没用过它** ——
+  `ChannelLogoStore` 只按频道名换算成台标仓库地址。
+  实测三条订阅源：虎牙 1069 条 / 斗鱼 939 条 / YY轮播 533 条 `tvg-logo`（用户说的"都是有自带的"属实）。
+  原版 1.7 的解析器（`M3uIptvParser.kt:60`）对每个频道都会给出 logo
+  （`tvg-logo ?: 台标仓库地址`），渲染时按它加载。
+- 改法：`ChannelLogoStore.candidates/bitmapFor` 新增 `remoteUrl` 参数，
+  候选顺序 = **内置（按名）→ 源自带 tvg-logo → 台标仓库四连**；
+  另加 `cachedBitmapFor()`（只读缓存）——回填时若再走 `bitmapFor` 会按名字重新解析出
+  另一套候选、拿不到已加载的图，台标就永远刷不出来（本轮第二个坑）。
+  `selectChannel` 里右上角/左下角台标也改用 `ch.logo`（否则列表有台标、底栏却空白）。
+- 实证：日志 `台标已加载（远程）：测试流·HLS ← https://cdn.jsdelivr.net/gh/feiyang666999/testvideo/tg.jpg`
+  —— 该地址正是源自带的 `tvg-logo`（对照：只按频道名时应为 `gcore.jsdelivr.net/gh/nid12345/mytv-logs/…`）。
+  演示源 `DEMO_M3U` 也补上了 `tvg-logo`（与真实订阅源写法一致，便于离线自检）。
+
+### 问题 6A 频道分组管理 / 全部分组管理 —— 已做（实测）
+- 参考原版 `channelgroup/ChannelGroupManageScreen.kt`（当前源）与
+  `SourceGroupManageScreen.kt`（全部源）；原版是 Compose `Drawer(Bottom)` + 网格，
+  本工程实现为等价原生抽屉 `ui/settings/GroupManageView.kt`（遮罩 + 底部深色圆角面板 +
+  可聚焦行，确认键切换显隐，行尾显示「显示中 / 已隐藏」）。
+- 数据落在既有 `Prefs.iptvSourceGroupHiddenMap`（按订阅源地址分别记忆，切源/重启保持，
+  与原版 `Configs.iptvSourceGroupHiddenMap` 同义）；`renderAll()` 按当前源隐藏名单过滤，
+  并把各源出现过的分组名写进 `iptvSourceGroupNamesMap` 供「全部分组管理」使用。
+- 实证：设置页 → 直播源 → 频道分组管理 → 抽屉列出 `香港频道/央视频道/卫视频道`
+  （截图 `R4-12`）→ 确认键切换为 `已隐藏`（截图 `R4-13`）。
+- 修了一个副作用：抽屉 `render()` 原来整表重建，`removeAllViews()` 把焦点交给窗口里第一个
+  可聚焦视图（实测把设置页左栏分类从「直播源」顶回「关于」）；改为**行集合不变时只改状态文本**。
+
+### 问题 6B 投屏（DLNA）—— 已做（实测到搜索链路）
+- 逐条移植原版 `core/data/repositories/dlna/` 三个文件 + `entities/dlna/DlnaDevice.kt`：
+  · `data/DlnaDiscovery.kt`：SSDP（239.255.255.250:1900、MediaRenderer ST、700ms 重发、
+    400ms 接收超时、CRLF 报文、网络接口挑选顺序 wlan→eth→en→任意、WiFi 多播锁）
+  · `data/DlnaController.kt`：`SetAVTransportURI`（DIDL-Lite 元数据，失败退化重试一次）→ `Play`；
+    `Stop`；`GetTransportInfo`；`guessProtocolInfo`；XML 转义
+  · `data/DlnaCastRepository.kt`：设备列表 + 正在投送设备 + 切设备时停掉上一台
+  · `ui/DlnaCastView.kt`：抽屉式设备列表（选中 = 投送、再次选中 = 断开、末尾「重新搜索」）
+- 结构性差异：原版用协程 + `StateFlow`，本工程（API 19、禁协程）改为
+  **后台线程 + `Handler` 回主线程 + 回调**，对外语义等价。
+- 接线：快捷菜单第一项「投屏」（此前只弹「将在 M11 接入」）→ 打开抽屉并立即开始搜索。
+- 实证：日志 `开始搜索投屏设备…` → `发现 0 台投屏设备` → `搜索结束，共 0 台设备`
+  （模拟器网络为 NAT，收不到宿主局域网的 SSDP 响应；**真机需复验能否发现设备**）；
+  截图 `R4-08`。
+- ⚠️ 环境限制：本机模拟器**无法**发现真实 DLNA 渲染器（NAT + 多播），因此
+  「能否真正推送到电视」**未实测**。
+
+### 问题 7 自定义项点不开 / 设置功能与 1.7 有差距 —— 已修（实测）
+- **「自定义直播源」点不开**，根因：`onCustomSource = { hidePanel(); showPanel(); onNavSelected(0) }`
+  —— 设置页是 MATCH_PARENT 且加在面板**之后**（盖在上面），既没关设置页，也没把焦点送进面板，
+  于是"点了没反应"。改法：`settings.close()` → 显示面板 → `navIdx=0` + `select(0)` +
+  `onNavSelected(0)`（切到「换源」）→ 下一帧把焦点送进订阅列表。
+  实证：截图 `R4b-06` —— 设置页关闭、换源面板列出 `自建源/虎牙/斗鱼/YY轮播/＋添加直播源`。
+- **「自定义节目单」同样没有 onClick**（与上一条同类）。改法：新增 `customEpgDialog()`
+  （应用风格输入框）→ 记入 `Prefs.epgSourceList` + 切为当前来源 + `fetchEpg()`；
+  并把 `epgSourceCurrent().url` 加进 `SettingsView.signature()`，改完立刻刷新该行。
+  ⚠️ **标注「接受近似」**：原版这一项打开 `EpgSourceScreen`（多来源列表 + 逐条删除 + 新增），
+  本轮只做了"录入并切为当前来源"，未复刻列表管理界面。
+- **13 个分类与条目清单已逐条比对原版 `SettingsCategories.kt` 与各 `SettingsCategoryXxx.kt`**：
+  分类名/顺序完全一致（关于/应用/直播源/节目单/预约/界面/收藏/更新/播放器/网络/调试/日志/推送）。
+
+### 本轮踩到的坑（复用结论）
+- 原版 1.7 的源码就在本机：`/Users/nid/WorkBuddy/2026-09-20-17-04-45/mytv-227`（tag `custom-v1.7`），
+  只读导出在 `/tmp/mytv17`。**不要再靠猜样式**，直接抄它的 dp/sp/色值。
+- `adb shell input keyevent --longpress` **不能**用来验证"按键长按"：同一毫秒内下发
+  DOWN(rep0)/DOWN(rep1)/UP，View 的 long-click 不触发（本轮白测一轮）。
+- `adb shell input keyevent 23` 之前的面板会自动超时（默认 5 秒，上一轮改的）→
+  交互类测试必须先用 `run-as` 把 `UI_SCREEN_AUTO_CLOSE_DELAY` 写成 60000。
+- 订阅源 `sub.ottiptv.cc` 在 **API 19 模拟器上 TLS 握手失败**
+  （`SSL23_GET_SERVER_HELLO:sslv3 alert handshake failure`）；`raw.githubusercontent.com` 同样失败，
+  `live.fanmingming.com` 只解析到 IPv6 而超时。→ **API 19 真机上这三条源/台标仓库很可能同样不可用**，
+  列为真机复验项。
+- 抽屉/列表"切换状态后整表重建"会把焦点丢给窗口里第一个可聚焦视图，**顺手把后台的设置页
+  分类也顶掉**。凡是覆盖层内的局部更新，优先"只改文本不重建"。
+
+### 产物
+`dist/MyTV-Legacy-v1.4-legacy9.apk`（release，同一把钥匙 `02e143e8…f7c2`，可直接覆盖安装）
++ `-debug.apk` + `dist/v1.4-修复报告.md` + `dist/evidence/R4*-*.png`
+
+---
+
+## v1.5 修复轮（2026-10-09 上午，用户真机 8 项）
+
+**本轮依据**：PROJECT-STATE.md（SHA-256 前 8 位 = `fa228bc5`，1056 行）
+**包内版本字符串**：`App.VERSION_NAME` → **`1.5-legacy.10`**
+**改动文件**：`MainActivity.kt` · `ui/ChannelInfoView.kt`（新增） · `ui/panel/{NavColumnView,ChannelColumnView}.kt`
+· `ui/settings/{SettingsCategories,SettingsView,SettingsCats}.kt` · `data/Prefs.kt` · `App.kt`
+**无新依赖；未改 M0/M1 定稿文件**
+**验证环境**：AVD `mytv19`（API 19）+ 自建源（4 组 / 56 频道）+ 内置 51zmt EPG（54 频道 / 3484 节目）
+
+### 问题 1 面板光标记忆 + 选台立即收起 —— 已修（实测）
+- **根因（三个叠加）**：
+  ① `panel.visibility = VISIBLE` 后系统把焦点**自动**交给分组栏第 1 项「换源」→ 该行 `onFocusChange`
+     触发 `onSelect(0)` → `onNavSelected(0)` → 中栏被换成订阅源列表；同时 `onRowFocused` 把
+     「上次在二级」的记忆冲成 false。
+  ② `FocusEngine.bind()` **在频道列从未被调用** → `restoreFocus(channelColumn, "<频道名>")`
+     在 `keyOfView` 里匹配不到任何子项 → **静默回落** `focusFirstIn()` 落到第 1 项，却仍返回 `true`
+     —— 日志写着"回到上次频道"、画面停在第 1 项。
+  ③ 收起动画期（`panelDismissing`，170ms）面板仍是 VISIBLE，焦点事件会冲掉记忆。
+- **改法**：`showPanel()` 改可见性**之前**快照 `wakeFocusInChannel/wakeFocusChannelName` +
+  `navColumn.setFocusSelectSuppressed(true)`（380ms 兜底那次结束后解除）；
+  `ChannelVH.bind()` 调 `FocusEngine.bind(card, row.channel.name)`；`tryRestorePanelFocus()`
+  回查 `FocusEngine.keyOf(findFocus())` 再决定日志措辞；`navColumn.onRowFocused` 加 `!panelDismissing` 守卫；
+  `selectChannel(fromPanel=true)` 立即 `hidePanel()` + `bottomBar` 置 GONE。
+- **实证**：日志 `面板唤出 → 光标回到上次频道「凤凰香港」`；截图 `R5i-02` 白卡落在第 3 行、
+  中栏是**频道列表**、一级「香港频道」白框**半透明**；`面板内选台 → 立即收起菜单与右下角信息`。
+
+### 问题 2 右下角信息去掉台标 —— 已修（实测）
+- `buildBottomBar()` 第一行移除台标 ImageView（标题 22sp 对齐 1.7 `headlineMedium`）。
+- 与原版一致：`ClassicChannelScreen` 里那个右下角 ChannelInfo **未**传 `showChannelLogoProvider`。
+
+### 问题 3 换台显示频道信息（台标/节目/进度/网速/线路），1.5 秒隐藏 —— 已修（实测）
+- 新增 `ui/ChannelInfoView.kt`，逐条对齐原版 `channel/components/ChannelInfo.kt`；
+  左下临时块 `showLogo=true` + 底部黑渐变（`0x00→0xB4→0xF3`，`ChannelTempScreen` 同款）。
+- `TEMP_CHANNEL_SCREEN_SHOW_MS = 1500L`；换台 / 换线路（`changeLineBy`）/ 面板内选台均触发。
+- **实证**：`左下信息块：频道=CCTV-4 线路=0/10 清晰度=null 网速=170KB/s
+  当前=海峡两岸-2026-281 下一=中国新闻 显示=true`；上键 `频道=CCTV-3 … 当前=星光大道-2026-49
+  下一=文化十分-2026-204 显示=true`；EPG 未覆盖的港台频道优雅回落「无节目信息」。
+
+### 问题 4 快捷菜单里的信息块 —— 已修（实测）
+- `quickOp.setInfoView(menuInfo)`（`ChannelInfoView(showLogo=true)`），`showQuickMenu()` 后
+  `refreshChannelInfoBlock()` 填充。实证截图 `R5-09`：按钮行上方＝台标 + 翡翠台 + 2/5 + 立体声 + 498KB/s。
+
+### 问题 5 收藏跨订阅源 —— 已修（实测）
+- `FavoriteChannel(name, epgName, urlList, logo)` 快照式；`toggleFavorite(ctx, channel)` 存快照；
+  `renderFavoritesPanel()` 当前源命中则用当前源、否则用快照并标注「来自其它订阅源」。
+- **实证**：注入异源收藏后仍列出（截图 `R5-10`）；日志 `收藏面板：共 1 条快照，当前源命中 0 条`。
+
+### 问题 6 记住上次频道 —— 已修（实测）
+- `rememberLastChannel()` 改为**始终生效**（开关已按要求删除）；
+- 修掉真实缺陷：`restoreLastChannel()` 原来**无条件**置 `lastChannelRestored=true`，
+  首次源加载失败即永久放弃重试 → 改为**恢复成功才置位**。
+- **实证**：prefs `IPTV_LAST_CHANNEL_IDX=3` → 重启日志 `回到上次频道：明珠台（全局序号 4）`。
+
+### 问题 7 内置「潮汕节目回放」—— 已做（实测）
+- `Prefs.defaultSources()` 增加 `潮汕节目回放 → https://gitee.com/nid123/chaoshan-tv/raw/master/data/chaoshan.txt`；
+  配置迁移 → v5（按 url 去重补到末尾）。
+- **实证**截图 `R5-04`：源列表 = 自建源(当前使用) → 虎牙 → 斗鱼 → YY轮播 → 潮汕节目回放 → ＋添加直播源。
+
+### 问题 8 删设置项 —— 已做（实测）
+- 直播源分类删除 5 项（潮汕节目回放 / 线路测速排序 / 记住上次频道 / 自动连播 / 直播源快速切换）；
+  `SettingsCategory.EPG_RESERVE`（预约）整个删除，`SettingsView` 的 `reserveView` 分支一并移除。
+- **实证**截图 `R5-15`：直播源分类仅 7 项；左栏 12 分类，无「预约」。
+
+### 本轮环境踩坑（重要，复用）
+- **模拟器 DNS 会整体坏掉**（qemu 转发挂了，连 baidu 都解析不了；宿主 `dig` 正常）→ **重启模拟器即恢复**。
+  诊断：`adb shell "ping -c1 -W3 <域名>"`。
+- **播放器在模拟器上解不了流的编码**（`avc1.64001E/640029` `NO_EXCEEDS_CAPABILITIES`）→
+  无限「归位重试 + 自动换线路」，既刷爆 logcat（缓冲被挤到只剩 36 行）又**卡住主线程**
+  （面板唤出后 3 秒才轮到恢复焦点）。→ 交互自动化必须**先等风暴结束（~30 秒）**，
+  并以 `logcat > file` **落盘**检索；API 19 的 logcat **不支持 `-G`**（加大缓冲）。
+- **后台 zsh 的 locale 会让中文 grep 静默失败**（伴随 `cut: Illegal byte sequence`）→ 日志检索改用 Python。
+- `adb pull <含括号路径>` 未转义会被 shell 当成子 shell → 用参数列表调用。
+- 面板**已关闭**时按 BACK 是「退出应用」→ 自动化里别用它关面板。
+- `FocusEngine.restoreFocus()` 匹配不到时**静默回落第一项并返回 true** → 凡以它判断"是否恢复到位"，
+  都必须回查真实落点，否则日志会撒谎。
+
+### 产物
+`dist/MyTV-Legacy-v1.5-legacy10.apk`（release，同一把钥匙 `02e143e8…f7c2`，可直接覆盖安装）
++ `-debug.apk` + `dist/v1.5-报告.md` + `dist/evidence/R5*.png`
+
+---
+
+## v1.6 最终版（2026-10-09，用户真机 4 项 + 出最终版 + 上传 GitHub）
+
+**本轮依据**：PROJECT-STATE.md（SHA-256 前 8 位 = `8a893850`，1138 行）
+**包内版本**：`1.6-legacy.11`（`versionCode = 11`，与 `build.gradle.kts` 一致）；应用显示名 **MyTV4.4**
+**新增依赖**：`org.conscrypt:conscrypt-android:2.5.2`（Apache-2.0）—— 本项目**第二次**为真实阻塞引入依赖
+（第一次是 ExoPlayer/OkHttp 本身）。已在 `THIRD-PARTY.md` / README 的「引用与致谢」中标注。
+
+### 问题 1 其他订阅源加载不出来 → 自己变成演示源 —— 已修（实测）
+- **根因**：`sub.ottiptv.cc` 这类服务端**只接受现代 AEAD 密码套件**，而
+  **Android 4.4 的 `supportedCipherSuites`（53 个）里只有 RC4/3DES/DES/CBC/NULL，没有任何 AEAD**
+  （GCM 到 Android 5.0 才进平台套件表）。
+  - 实测证据 1（日志）：`error:14077410:SSL routines:SSL23_GET_SERVER_HELLO:sslv3 alert handshake failure`
+  - 实测证据 2（本机 curl 复现）：`curl --tlsv1.2 --ciphers 'ECDHE-RSA-AES128-SHA:AES128-SHA:...'`
+    得到**同一个** sslv3 alert；去掉 `--ciphers`（默认含 GCM）即 200。
+  - 实测证据 3（设备能力日志，一次性输出完整套件表）：53 个里 `含 GCM/CHACHA 的: （无）`。
+- **改法**：`Http.ensureTlsReady()` 无条件装载 Conscrypt provider（判据只用「平台有没有 AEAD」打日志），
+  之后 `SSLContext` / `TrustManagerFactory` 都走 Conscrypt；配合既有的「强制 TLS 1.2 + AEAD 优先套件表」。
+  另加 **https → http 协议回落**。
+- **同时修掉「静默换成演示源」**：原来 `parsed.isEmpty()` 就无条件 `renderAll(DEMO_M3U)`
+  —— 用户既看不到原因、正在看的列表也被无声替换。现在**保留原列表** + 底栏粘性报错；
+  只有「一个频道都没有」时才用演示源兜底。
+- **实证**：虎牙 `191,616` 字节 / 斗鱼 `164,953` / YY轮播 `105,496`，错误均为「无」，
+  导航显示真实分组 `4K频道（第 3/6 项）`（修复前 0 字节 + 握手失败 → 演示频道）。
+- **本轮踩坑（重要）**：
+  ① 最初用「平台套件表有没有 AEAD」做装载开关，而探测用的 `socketFactory.createSocket()`（无参）
+     在 API 19 会抛异常 → 被 `runCatching` 兜成"支持" → **直接跳过 Conscrypt**，白跑一轮。
+     改为无条件装载，探测只用于日志。
+  ② 装完用 `createSocket("localhost", 443)` 复检会做 DNS 解析 → 主线程抛
+     `NetworkOnMainThreadException`，把"装成功了"误报成失败。改为只读 `supportedCipherSuites` 属性。
+
+### 问题 2 返回键连按两次退出 —— 已修（实测，对齐 1.7 `DoubleBackPressedExitState`）
+- `allowExit` + 2 秒 `resetAllowExit`；第一次弹 `Snackbar("再按一次退出")`，第二次才 `super.onBackPressed()`。
+- 任何**被面板/对话框/抽屉消费掉**的返回键都会 `cancelExitConfirm()`（避免"关面板+再按一次"就退出）。
+- **实证日志**：`返回键：第一次 → 提示「再按一次退出」（2000ms 内再按才退出）` →
+  `返回键：第二次 → 退出应用`；只按一次并等 3 秒只出现「第一次」，应用仍在播放。
+- **测试方法提醒**：`adb shell input keyevent 4` 单次开销数百毫秒，两次间隔要压到 ~0.6 秒
+  （我第一次用 1.2 秒间隔，实际耗时 2.16 秒，误判成"功能没生效"）。
+
+### 问题 3 图标清晰化 + 应用名改 MyTV4.4 —— 已做（实测）
+- 应用名：`strings.xml` → `MyTV4.4`（`aapt dump badging` 实测 `application-label:'MyTV4.4'`）。
+- 图标：改为 **1024×1024 一次画好 → LANCZOS 降采样**到各密度，并**新增 `mipmap-tvdpi`（64px）**
+  —— TV 盒子常见 213dpi，原来缺这一档，系统只能拿 mdpi 放大，这是"发糊"的直接原因。
+- 自适应图标同步：`ic_launcher_foreground` 换成同款矢量；`ic_launcher_background` → `#0E2A44`
+  （`aapt dump resources` 实测 `d=0xff0e2a44`）。
+
+### 问题 4 应用升级通道 —— 已做（代码/链路；端到端待仓库就绪）
+- 新增 `data/UpdateRepository.kt`（清单拉取 raw→ghproxy→jsDelivr 三线路回退、versionCode 比较、
+  下载到 `getExternalFilesDir("update")`、MD5 校验）与 `AppDialog.buildMessage()`（多按钮+长正文）。
+- `MainActivity`：`checkForUpdate()` / `showUpdateDialog()` / `downloadUpdate()`（带进度节流）/ `installApk()`
+  （API 24+ 用 FileProvider 的 content://，API 19~23 用 file://）。
+- `AndroidManifest`：新增 `REQUEST_INSTALL_PACKAGES` + `FileProvider`（`res/xml/file_paths.xml`）。
+- 分发走 GitHub：版本清单 = 仓库 `update/version.json`，安装包 = GitHub Releases 附件。
+- **签名改造**：release 签名从**不进仓库**的 `keystore.properties` 读取（仓库只留 `.example`），
+  避免把私钥口令提交上去。
+
+### 上传 GitHub 的阻塞（需要用户授权）
+- 工作区的 GitHub 连接是 **GitHub App 集成**：创建仓库返回 `403 Resource not accessible by integration`。
+- 本机 **git 协议通道被封**（`github.com/yaoxieyoulei/.../info/refs` → `http=000`），
+  而 `api.github.com` → **200**；本地会话里的 4 个旧 token 全部 **401 已失效**。
+- 待用户提供新 PAT 后，用 REST API 完成：建公开仓库 `MyTV4.4` → 推送 172 个文件
+  （103 文本 + 69 二进制 ≈ 2.2 MB）→ 建 Release `v1.6` 上传 APK。
+
+### 产物
+`dist/MyTV4.4-v1.6-legacy11.apk`（release 10.3 MB，同一把钥匙 `02e143e8…f7c2`）
++ `-debug.apk`（12.8 MB）+ `dist/v1.6-报告.md` + `dist/evidence/V16-*.png`
++ 仓库文档 `README.md` / `LICENSE` / `THIRD-PARTY.md` / `update/version.json` / `.gitignore`
+体积变化：6.76 MB → 10.3 MB（+3.5 MB，Conscrypt 的 4 个 ABI 原生库；如需瘦身可只留 arm 两档）。

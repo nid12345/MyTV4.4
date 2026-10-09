@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  字号体系 —— 逐字抄自 MyTV 1.7（源码 tag `custom-v1.7`，提交 7d1081f）
+  `tv/ui/theme/Type.kt`（原版用 tv-material3 的 `Typography`）。
+
+  原版共 **15 级**（display 3 / headline 3 / title 3 / label 3 / body 3）。
+  ⚠️ 第二步计划 §M4 写的是"14 级"，实测原文件是 15 级 —— 这里按**原文件**为准（15 级）。
+  原版全部 fontWeight = Normal，无字重差异，因此本文件只固化字号与行高。
+
+  `_sp` 后缀为字号，`_lh` 后缀为行高（单位 sp，与原版一致）。
+  本工程 View 侧用 `setTextSize(TypedValue.COMPLEX_UNIT_SP, value)` 消费，
+  行高如需精确控制用 `setLineSpacing`（View 没有 TextStyle 的行高概念）。
+-->
+<resources>
+
+    <!-- ============ Display ============ -->
+    <dimen name="ts_display_large_sp">57sp</dimen>
+    <dimen name="ts_display_large_lh">64sp</dimen>
+    <dimen name="ts_display_medium_sp">42sp</dimen>
+    <dimen name="ts_display_medium_lh">52sp</dimen>
+    <dimen name="ts_display_small_sp">36sp</dimen>
+    <dimen name="ts_display_small_lh">44sp</dimen>
+
+    <!-- ============ Headline ============ -->
+    <dimen name="ts_headline_large_sp">32sp</dimen>
+    <dimen name="ts_headline_large_lh">40sp</dimen>
+    <dimen name="ts_headline_medium_sp">28sp</dimen>
+    <dimen name="ts_headline_medium_lh">36sp</dimen>
+    <dimen name="ts_headline_small_sp">24sp</dimen>
+    <dimen name="ts_headline_small_lh">32sp</dimen>
+
+    <!-- ============ Title ============ -->
+    <dimen name="ts_title_large_sp">22sp</dimen>
+    <dimen name="ts_title_large_lh">28sp</dimen>
+    <dimen name="ts_title_medium_sp">16sp</dimen>
+    <dimen name="ts_title_medium_lh">24sp</dimen>
+    <dimen name="ts_title_small_sp">14sp</dimen>
+    <dimen name="ts_title_small_lh">20sp</dimen>
+
+    <!-- ============ Label ============ -->
+    <dimen name="ts_label_large_sp">14sp</dimen>
+    <dimen name="ts_label_large_lh">20sp</dimen>
+    <dimen name="ts_label_medium_sp">12sp</dimen>
+    <dimen name="ts_label_medium_lh">16sp</dimen>
+    <dimen name="ts_label_small_sp">11sp</dimen>
+    <dimen name="ts_label_small_lh">16sp</dimen>
+
+    <!-- ============ Body ============ -->
+    <dimen name="ts_body_large_sp">16sp</dimen>
+    <dimen name="ts_body_large_lh">24sp</dimen>
+    <dimen name="ts_body_medium_sp">14sp</dimen>
+    <dimen name="ts_body_medium_lh">20sp</dimen>
+    <dimen name="ts_body_small_sp">12sp</dimen>
+    <dimen name="ts_body_small_lh">16sp</dimen>
+
+</resources>

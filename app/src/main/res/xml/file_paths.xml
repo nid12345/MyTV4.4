@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider 可共享的路径（v1.6 应用升级通道）。
+  只开放「应用专属外部目录下的 update/」——下载的安装包放在那里，
+  既不需要任何存储权限，也不会把用户其它目录暴露出去。
+-->
+<paths>
+    <external-files-path name="update" path="update/" />
+</paths>

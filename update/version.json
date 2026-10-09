@@ -1,0 +1,8 @@
+{
+  "versionCode": 11,
+  "versionName": "1.6-legacy.11",
+  "url": "https://github.com/nid12345/MyTV4.4/releases/download/v1.6/MyTV4.4-v1.6-legacy11.apk",
+  "size": 10289897,
+  "md5": "56889dcb39d58e582daf4a5d52c85bf6",
+  "notes": "1. 修复「点开其它直播源订阅地址加载不出来」——Android 4.4 的 TLS 不支持 AES-GCM 套件，已内置 Conscrypt 补齐现代加密套件。\n2. 订阅源加载失败时不再悄悄换成演示源，改为明确提示失败原因并保留当前列表。\n3. 返回键改为连按两次退出（第一次提示「再按一次退出」），避免误按。\n4. 应用图标重绘为高清多密度（并补上 TV 盒子常见的 tvdpi），应用名改为 MyTV4.4。\n5. 新增应用内升级通道：设置 → 更新 → 检查更新，可直接下载并安装新版本。"
+}

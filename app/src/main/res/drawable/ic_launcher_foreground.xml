@@ -1,0 +1,35 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 天线（左） -->
+    <path
+        android:strokeColor="#96C8EC"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:pathData="M42,45 L33,30" />
+
+    <!-- 天线（右） -->
+    <path
+        android:strokeColor="#96C8EC"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round"
+        android:pathData="M66,45 L75,30" />
+
+    <!-- 机身（白色圆角矩形） -->
+    <path
+        android:fillColor="#E8F4FF"
+        android:pathData="M31,43 L77,43 A7,7 0 0 1 84,50 L84,77 A7,7 0 0 1 77,84 L31,84 A7,7 0 0 1 24,77 L24,50 A7,7 0 0 1 31,43 Z" />
+
+    <!-- 屏幕（深色内嵌） -->
+    <path
+        android:fillColor="#1A3A58"
+        android:pathData="M32,50 L76,50 A3.5,3.5 0 0 1 79.5,53.5 L79.5,73.5 A3.5,3.5 0 0 1 76,77 L32,77 A3.5,3.5 0 0 1 28.5,73.5 L28.5,53.5 A3.5,3.5 0 0 1 32,50 Z" />
+
+    <!-- 播放三角 -->
+    <path
+        android:fillColor="#FF605C"
+        android:pathData="M48,56 L68,63.5 L48,71 Z" />
+</vector>

@@ -1,0 +1,28 @@
+# ---- 构建产物 ----
+*.iml
+.gradle/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+
+# ---- 本机配置（不同机器路径不同）----
+local.properties
+.DS_Store
+Thumbs.db
+
+# ---- 签名材料：绝不入库 ----
+keystore.properties
+keystore/
+*.jks
+*.keystore
+
+# ---- 本机工作产物（报告 / 实测证据 / 分发包）----
+dist/
+
+# ---- 编辑器 ----
+.idea/
+*.swp
