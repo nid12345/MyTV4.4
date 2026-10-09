@@ -101,9 +101,9 @@ cp keystore.properties.example keystore.properties
    {
      "versionCode": 11,
      "versionName": "1.6-legacy.11",
-     "url": "https://github.com/<owner>/<repo>/releases/download/v1.6/MyTV4.4-v1.6-legacy11.apk",
-     "size": 7000000,
-     "md5": "可留空",
+     "url": "https://github.com/nid12345/MyTV4.4/releases/download/v1.6/MyTV4.4-v1.6-legacy11.apk",
+     "size": 10289897,
+     "md5": "56889dcb39d58e582daf4a5d52c85bf6",
      "notes": "更新说明，可多行"
    }
    ```
