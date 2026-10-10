@@ -1,6 +1,7 @@
 package top.yogiczy.mytv.legacy.data
 
 import android.content.Context
+import android.os.Environment
 import android.util.Log
 import okhttp3.Request
 import org.json.JSONObject
@@ -135,6 +136,88 @@ object UpdateRepository {
     }
 
     /**
+     * 解析一个**真能写**的下载目录。
+     *
+     * ---------------------------------------------------------------------------
+     * v1.12 需求 5（小米电视更新失败修复）
+     * ---------------------------------------------------------------------------
+     * 真机反馈：小米电视上点「立即更新」失败，底部提示
+     * `无法创建下载目录：/storage/emulated/0/Android/data/top.yogiczy.mytv.legacy.debug/files/update`。
+     *
+     * 老代码（v1.8）只做了一次尝试：
+     * ```
+     * val base = ctx.getExternalFilesDir(null) ?: ctx.filesDir
+     * val dir = File(base, "update")
+     * if (!dir.exists() && !dir.mkdirs() && !dir.exists()) return null to "无法创建下载目录：…"
+     * ```
+     * 于是在小米这类对 `Android/data/<pkg>/files` 有额外策略的 ROM 上，
+     * `mkdirs()` 失败 → 更新通道**彻底不可用**，而且报错文案还是开发口径的绝对路径。
+     *
+     * 现在改成两件事：
+     *   ① **按顺序试多个候选目录**，第一个"真的能写"的胜出（不再一失败就放弃）；
+     *   ② 判据不是 `mkdirs()` 的返回值，而是**实打实写一个探针文件再删掉**——
+     *      `mkdirs()` 会骗人（返回 true 或目录已存在，写入仍抛 EACCES），写入不会。
+     *
+     * 候选顺序（越靠前位置越"标准"）：
+     *   1. `getExternalFilesDir(null)` → `/sdcard/Android/data/<pkg>/files/update`（标准位置，API 19 免权限）
+     *   2. `Environment.getExternalStorageDirectory()` → 同上路径手工拼
+     *      （少数 ROM 的 `getExternalFilesDir` 返回 null，但真实路径其实可写）
+     *   3. `ctx.filesDir` → `/data/data/<pkg>/files/update`（内部私有，**必然可写**，兜底中的兜底）
+     *   4. `ctx.externalCacheDir`、5. `ctx.cacheDir`（缓存目录兜底）
+     *
+     * ⚠️ 落到 **3/5（内部目录）** 时，API < 24 的 `file://` 安装需要文件可被安装器读取，
+     * 这一步由 [top.yogiczy.mytv.legacy.MainActivity.installApk] 里的 `setReadable` 负责。
+     *
+     * @return (目录, 失败原因)。目录为 null 时，第二个值是**每个候选各自的失败原因**。
+     */
+    private fun resolveDownloadDir(ctx: Context): Pair<File?, String> {
+        val candidates = LinkedHashMap<String, File>()
+        runCatching { ctx.getExternalFilesDir(null) }.getOrNull()?.let {
+            candidates["外部私有目录"] = File(it, "update")
+        }
+        runCatching { Environment.getExternalStorageDirectory() }.getOrNull()?.let {
+            candidates["外部存储根"] = File(it, "Android/data/${ctx.packageName}/files/update")
+        }
+        candidates["应用内部目录"] = File(ctx.filesDir, "update")
+        runCatching { ctx.externalCacheDir }.getOrNull()?.let {
+            candidates["外部缓存目录"] = File(it, "update")
+        }
+        candidates["内部缓存目录"] = File(ctx.cacheDir, "update")
+
+        val errors = ArrayList<String>()
+        for ((label, dir) in candidates) {
+            val why = probeWritable(dir)
+            if (why == null) {
+                Log.i(TAG, "下载目录就绪（$label）：${dir.absolutePath}")
+                return dir to ""
+            }
+            errors.add("$label(${dir.absolutePath})：$why")
+            Log.w(TAG, "下载目录不可用（$label）${dir.absolutePath} -> $why")
+        }
+        return null to errors.joinToString("；")
+    }
+
+    /**
+     * 探针：建目录 → 真写 1 个字节 → 删掉。返回 null 表示可用，否则返回失败原因。
+     *
+     * 之所以不能只看 `mkdirs()`：小米电视对 `Android/data/<pkg>/files` 的策略是
+     * "目录建得出来、文件写不进去"，只看返回值会误判为可用，
+     * 于是下载走到 `FileOutputStream` 才炸 —— 错误信息也更难懂。
+     */
+    private fun probeWritable(dir: File): String? {
+        if (!dir.exists() && !dir.mkdirs() && !dir.exists()) return "无法创建目录"
+        if (!dir.isDirectory) return "同名路径不是目录"
+        val probe = File(dir, ".wprobe")
+        return try {
+            FileOutputStream(probe).use { it.write(0) }
+            probe.delete()
+            null
+        } catch (t: Throwable) {
+            "${t.javaClass.simpleName}: ${t.message}"
+        }
+    }
+
+    /**
      * 下载安装包。
      *
      * @param onProgress 形参为 0f..1f（-1 表示总长度未知），回调在**后台线程**；
@@ -152,12 +235,11 @@ object UpdateRepository {
         // `update`，最终解析成 `/update` —— mkdirs 必然失败，下载直接
         // `open failed: ENOENT (/update/MyTV4.4-x.apk.part)`。
         // 这会让「检查更新」能弹框、点「立即更新」却永远下载失败（用户反馈的"点了没反应"）。
-        // 现在：外部目录拿不到就落内部私有目录，并且把建目录失败当错误直接报出来。
-        val base = ctx.getExternalFilesDir(null) ?: ctx.filesDir
-        val dir = File(base, "update")
-        if (!dir.exists() && !dir.mkdirs() && !dir.exists()) {
-            return null to "无法创建下载目录：${dir.absolutePath}"
-        }
+        // v1.12 需求 5：单次尝试 → [resolveDownloadDir] 的多候选 + 写入探针。
+        // ⚠️ 必须分两句写：`why` 若出现在**同一条**解构声明的 elvis 分支里，
+        // Kotlin 还没把它声明出来，会报 "Unresolved reference: why"。
+        val (dirOrNull, why) = resolveDownloadDir(ctx)
+        val dir = dirOrNull ?: return null to "无法找到可写的下载目录（已尝试：$why）"
         val target = File(dir, "MyTV4.4-${info.versionName}.apk")
         // 已经下好且校验通过就直接复用，避免重复下载
         if (target.exists() && target.length() > 0 && matchesMd5(target, info.md5)) {

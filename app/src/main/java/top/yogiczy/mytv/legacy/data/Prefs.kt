@@ -146,7 +146,7 @@ object Prefs {
     private const val K_FAVORITES = "favorites"
 
     /** 当前配置版本，每次需要把新默认值刷到老配置上时 +1。与 `Configs.CURRENT_CONFIG_VERSION` 一致。 */
-    const val CURRENT_CONFIG_VERSION = 5
+    const val CURRENT_CONFIG_VERSION = 6
 
     /** 与 `Constants.LOG_HISTORY_MAX_SIZE` 无关，仅用于内置源展示。 */
     fun defaultSource() = IptvSource("自建源", "https://tvlive.nide.qzz.io")
@@ -154,8 +154,9 @@ object Prefs {
     /**
      * 内置默认直播源列表。
      *
-     * 顺序固定：**内置源（自建源）在前，随后虎牙 / 斗鱼 / YY轮播 / 潮汕节目回放**
-     * （判据 6 用户明确要求前三条；问题 7 用户要求把潮汕回放也内置进来）。
+     * 顺序固定：**内置源（自建源）在前，随后虎牙 / 斗鱼 / YY轮播 / 潮汕节目回放 / 潮剧**
+     * （判据 6 用户明确要求前三条；问题 7 用户要求把潮汕回放也内置进来；
+     * v1.12 需求 1 用户要求把「潮剧」也内置进来）。
      */
     fun defaultSources(): List<IptvSource> = listOf(
         defaultSource(),
@@ -166,6 +167,10 @@ object Prefs {
         // 伪分组（开关 `IPTV_CHAOSHAN_SOURCE_ENABLE`）；现在改为独立内置订阅源，
         // 设置里那个开关也按要求删掉了。
         IptvSource("潮汕节目回放", "https://gitee.com/nid123/chaoshan-tv/raw/master/data/chaoshan.txt"),
+        // v1.12 需求 1（用户给定地址）：潮剧。
+        // 该源为 `名称,#genre#` + `剧目名,url1#url2#url3…` 的 txt 格式，一个剧目带 N 条线路
+        // （N 集），因此必须配合 `onPlaybackEnded` 的"同节目内线路顺序连播"一起才完整。
+        IptvSource("潮剧", "https://nide.qzz.io/chaoju/chaoju.txt"),
     )
 
     /**
@@ -674,6 +679,13 @@ object Prefs {
 
         // v5（问题 7）：新增内置源「潮汕节目回放」。老配置按 url 去重补到末尾。
         if (savedVersion < 5) {
+            val cur = sources(ctx)
+            val missing = defaultSources().filter { d -> cur.none { it.url == d.url } }
+            if (missing.isNotEmpty()) saveSources(ctx, cur + missing)
+        }
+
+        // v6（v1.12 需求 1）：新增内置源「潮剧」。老配置按 url 去重补到末尾。
+        if (savedVersion < 6) {
             val cur = sources(ctx)
             val missing = defaultSources().filter { d -> cur.none { it.url == d.url } }
             if (missing.isNotEmpty()) saveSources(ctx, cur + missing)

@@ -7,7 +7,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import top.yogiczy.mytv.legacy.core.UiLog
-import top.yogiczy.mytv.legacy.ui.UiKit
 
 /**
  * 经典三段式的**容器与三态状态机**。
@@ -110,12 +109,11 @@ class PanelHost(context: Context) : LinearLayout(context) {
     val currentState: Int get() = state
     val isAnimating: Boolean get() = animating
 
-    /** 列背景（原 `columnBg`）。 */
-    fun columnBg(left: Boolean): android.graphics.drawable.GradientDrawable = UiKit.rounded(
-        if (left) UiKit.withAlpha(0xFF1D1B20.toInt(), 0.96f)
-        else UiKit.withAlpha(0xFF1D1B20.toInt(), 0.88f),
-        10f, context
-    )
+    // v1.12 需求 2（整体视觉对齐）：这里原本还留着一份 `columnBg(left)` 的**副本**
+    // （左列 0.96 / 其余 0.88、圆角 10f/10f），但它**从未被调用** —— 三列的背景实际上由
+    // `MainActivity.columnBg()` 统一给。两份实现值不一样，是"同一块面板却有色阶"的隐患，
+    // 因此删掉这份死代码，背景只保留 MainActivity 一处定义。
+    // 若日后要搬进本类，请把两个值也一起统一成 0.94 / 10f。
 
     /** 三列的公共高度参数由宿主给（屏高的 60%）。 */
     var panelMaxH: Int = ViewGroup.LayoutParams.WRAP_CONTENT

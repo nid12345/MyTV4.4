@@ -32,6 +32,15 @@ import top.yogiczy.mytv.legacy.data.EpgProgramme.Companion.isLive
  */
 class EpgColumnView(context: Context) : LinearLayout(context) {
 
+    private companion object {
+        /** 左右内边距（dp）—— 与 [init] 里 `setPadding` 的 6dp 必须一致，[desiredWidthPx] 要用。 */
+        const val COLUMN_H_PAD_DP = 6f
+        /** 列表隐藏（提示条 / 占位）时的列宽（dp）。 */
+        const val TIP_WIDTH_DP = 268f
+        /** 日期列宽度（dp），对齐原版 `EpgDayItemList(width = 80.dp)`。 */
+        const val DAY_COLUMN_DP = 80f
+    }
+
     private val tip = EpgTipView(context)
     private val placeholder = TextView(context).apply {
         text = "无节目信息"
@@ -143,10 +152,36 @@ class EpgColumnView(context: Context) : LinearLayout(context) {
 
     /** 聚焦时列表加宽到 340dp（原版 `EpgProgrammeItemList` 的宽度切换）。 */
     fun setFocused(focused: Boolean) {
+        this.focused = focused
         listWrap.layoutParams = LinearLayout.LayoutParams(
             UiKit.dp(context, if (focused) 340f else 268f),
             ViewGroup.LayoutParams.MATCH_PARENT
         )
+    }
+
+    /** 当前是否处于聚焦态（[desiredWidthPx] 要用）。 */
+    private var focused = false
+
+    /**
+     * 本列**应该**有多宽（px）= 左右内边距 + 节目列表 + [跨天时的]日期列。
+     *
+     * v1.12 需求 2（整体视觉对齐）：此前这段宽度由 `MainActivity` **写死 420dp** ——
+     * 那是"聚焦(340) + 跨天日期列(80)"的最宽组合，于是：
+     *   · 状态 1（不聚焦）时内容只有 `6 + 268 + 6 = 280dp`，右边白白多出一条
+     *     **140dp 的空面板底**，看起来就像第三列没画完；
+     *   · 普通频道（不跨天）聚焦时也会多出 68dp。
+     * 现在按实际内容算，宽度永远贴合内容，三段式的位移也就不用跟着改
+     * （`PanelHost` 只用到分组栏与频道列的实测宽度，与第三列无关）。
+     */
+    fun desiredWidthPx(): Int {
+        val listW = if (listWrap.visibility == View.VISIBLE) {
+            if (focused) 340f else 268f
+        } else {
+            // 提示条 / 占位（都是 MATCH_PARENT）没有自身宽度，给一个能让竖排文字站住的宽度
+            TIP_WIDTH_DP
+        }
+        val dayW = if (dayColumn.visibility == View.VISIBLE) DAY_COLUMN_DP else 0f
+        return UiKit.dp(context, listW + dayW + 2 * COLUMN_H_PAD_DP)
     }
 
     /** 只显示竖排提示条（尚未展开 / 没有节目单数据时）。 */

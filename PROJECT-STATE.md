@@ -24,13 +24,14 @@
 ## 当前进度
 
 - 已完成：**M0 / M1 / M2 / M3（含三项补测） / M4 / M5 / M6 / M7 / M8 / M9 / M10 / M13 / M14**
-- 进行中：**无** —— **项目已交付（v1.0）**
-- 未开始：**—**（M11 / M12 已推迟到 v1.1）
-- **最终产物**：`dist/MyTV-Legacy-v1.0.apk`（release 签名）/ `dist/MyTV-Legacy-v1.0-debug.apk`
-- **签名**：`keystore/mytv-release.jks`（alias=mytv，本轮新建，需备份）
-- 下一个强制汇报检查点：**M10 + M14 合并完成后（终检）**
-- **阻塞已清空**：B1（TLS）与 B2（模拟器 DNS）均已修复并复测通过，见下节。
-- **B1 遗留 (c)（HTTPS EPG）已兑现**：M7 接线后首验通过，见 `dist/evidence/M7-evidence.md` 判据 7。
+- 已交付版本：**v1.0 → v1.12**（`versionCode 6 → 17`），全部已发 GitHub Release（tag `v1.8` / `v1.10` / `v1.11` / `v1.12`）
+- 进行中：**无**
+- **最新产物**：`dist/MyTV4.4-v1.12-legacy17.apk`（release 10,334,270 B）/ `dist/MyTV4.4-v1.12-legacy17-debug.apk`
+- **签名**：`keystore/mytv-release.jks`（alias=mytv，需备份）；
+  SHA-256 `02e143e8102283c2a3d26c505ea5fa44962ff84115eb598cbed467c97236f7c2`（v1.7 起未换钥）
+- **阻塞**：无
+- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.12 = `versionCode 17`）
+- 下一个强制汇报检查点：**下一轮用户需求到来时**
 
 ## 📌 已知偏差（记入不追究）
 
@@ -1642,3 +1643,306 @@ I/MyTVLegacy: 播放：回到前台 → 恢复播放     ← am start 回到 Mai
 - `dist/MyTV4.4-v1.11-legacy16.apk`（release 10,331,653 B，MD5 `36f75fc1a08c5243c0a5408c5356b058`，已签名）
 - `dist/MyTV4.4-v1.11-legacy16-debug.apk`（debug 17,106,627 B，MD5 `739150bb3d18790b5b23b510d8932bfd`）
 - `update/version.json` → v1.11 清单
+
+---
+
+# v1.12（versionCode 17 / `1.12-legacy.17`）
+
+用户四条 + 中途追加的小米电视更新失败一条，共五件事。`CURRENT_CONFIG_VERSION` 5 → **6**。
+
+## 需求 1：内置「潮剧」订阅源 + 同一节目多线路顺序连播
+
+### 1a 内置源
+
+`Prefs.defaultSources()` 末尾新增（按用户给定地址，原样使用）：
+
+```kotlin
+// v1.12 需求 1（用户给定地址）：潮剧。
+IptvSource("潮剧", "https://nide.qzz.io/chaoju/chaoju.txt"),
+```
+
+新增 `< 6` 迁移：老配置**按 url 去重**把缺的默认源补到末尾，不动用户已有条目。
+
+```kotlin
+if (savedVersion < 6) {
+    val cur = sources(ctx)
+    val missing = defaultSources().filter { d -> cur.none { it.url == d.url } }
+    if (missing.isNotEmpty()) saveSources(ctx, cur + missing)
+}
+```
+
+**源结构实测**（不是"看着像"，是拉下来逐行解析过的）：163 行、**26 个 `#genre#` 分类、
+126 个频道**。格式为 `剧目名,#genre#` 后接 `剧团版本,url1#url2#…#urlN`。
+用 URL 逐条比对确认：**同一频道的 N 条 URL 共享同一 `/p/<id>/` 前缀、只有剧集 id 不同**
+—— 即 **一个频道 = 一个剧团的版本，它的"线路"就是这一版的分集**。
+所以"同一节目内线路顺序连播，播完再换下一个节目"与源语义完全对齐。
+
+线路数分布：`{1:58, 2:6, 3:10, 4:3, 5:5, 6:17, 7:11, 8:9, 9:1, 10:2, 11:1, 12:3, 13:4,
+16:2, 17:1, 20:1, 23:1, 25:1, 234:1}` —— 最后那个 234 条的是「名家名段 / 潮剧精选（合集）」。
+
+### 1b 顺序连播
+
+`onPlaybackEnded()` 头部插入**"先续本节目下一条线路"**分支，原有
+「同分组下一个 → 下一分组第一个 → 停」链条原样保留在其后：
+
+```kotlin
+// ① v1.12 需求 1：同一节目（频道）内优先接着播下一条线路
+if (::player.isInitialized) {
+    val li = player.currentLineIdx
+    val ln = player.lineCount
+    if (ln > 1 && li in 0 until ln - 1) {
+        val nextLine = li + 1
+        lastAutoNextAt = now
+        UiLog.i("播放", "点播播完自动连播 → 《${cur.name}》第 ${nextLine + 1}/${ln} 条线路（本节目内续播）")
+        Snackbar.show("自动连播：第 ${nextLine + 1}/${ln} 条线路", this)
+        player.switchLine(nextLine)
+        channelStartedAt = SystemClock.uptimeMillis()
+        showTempChannelInfo()
+        return
+    }
+    if (ln > 1) UiLog.i("播放", "点播播完：《${cur.name}》${ln} 条线路已全部播完，转下一个节目")
+}
+```
+
+`MIN_AUTO_NEXT_PLAY_MS = 15_000L`（太短的播放不算播完）与 3 秒 `lastAutoNextAt` 去抖未动。
+
+**不会伤到内置直播源**（专门核查过）：自建源 56 个频道里 54 个是多线路（49 个有 10 条镜像），
+但它们全是直播 m3u8/flv，**永远不会走到 `STATE_ENDED`**，所以新规则在那条路径上永不触发。
+
+> 顺带核查：潮汕节目回放的 gitee 地址是 302 跳转（裸 GET 只回 450 字节 HTML，`curl -L` 才 17 KB），
+> 但 `Http.client` 已设 `followRedirects(true)` / `followSslRedirects(true)`，**无需改动**。
+
+### 实测
+
+模拟器 `shared_prefs/legacy_prefs.xml` 里 `APP_CONFIG_VERSION = 6`；换源面板截图可见
+`自建源 / 虎牙 / 斗鱼 / YY轮播 / 潮汕节目回放 / **潮剧**`；切到潮剧后中栏出现
+`陈三五娘 / 苏六娘 / 荔镜记 / 辞郎洲 / 扫窗会 / 杨令婆辩本 / 辩十本`，
+频道列显示 `陈三五娘（百花潮剧院）` + **`8 条线路`**，多线路解析确认可用。
+
+> ⚠️ **"播完自动接线路 2"这一步在本模拟器上做不到端到端实测**：潮剧的线路在模拟器里
+> 解码即报 `4003 / NO_EXCEEDS_CAPABILITIES`（软件解码器能力不足），产生不出真实的
+> `STATE_ENDED`。已在**产物层**验证：release / debug 两个 APK 的 dex 里
+> `自动连播：第 ` 字符串存在，`onPlaybackEnded` 的续播分支在编译产物中确认落地。
+
+## 需求 2：整体 UI 视觉对齐
+
+`PanelHost` 里其实有**两份** `columnBg`：`MainActivity` 那份（alpha `0.94f`）才是真正画上去的，
+`PanelHost.columnBg`（左 0.96 / 其余 0.88）是**从未被调用的死代码**。删掉死的那份，
+两处不一致这个隐患消除；同时把列背景统一为
+`UiKit.rounded(UiKit.withAlpha(Palette.surface(this), 0.94f), 10f, this)`（圆角与底部提示条一致）。
+
+`panelLeftMarginDp` 改名 `panelEdgeDp = 24f`，面板 `topMargin` 16→24，
+右上信息块 `s(18f)/s(28f)`→`s(panelEdgeDp)`，EPG 进度条 `leftMargin` 28→24 —— 四边留白统一到 24dp。
+
+节目单列不再写死 420dp，改为**按内容自适应**：新增 `EpgColumnView.desiredWidthPx()`
+
+```kotlin
+fun desiredWidthPx(): Int {
+    val listW = if (listWrap.visibility == View.VISIBLE) {
+        if (focused) 340f else 268f
+    } else TIP_WIDTH_DP          // 268f
+    val dayW = if (dayColumn.visibility == View.VISIBLE) DAY_COLUMN_DP else 0f  // 80f
+    return UiKit.dp(context, listW + dayW + 2 * COLUMN_H_PAD_DP)                 // 6f
+}
+```
+
+新增 `syncEpgColumnWidth()`，在 `panel.onStateChanged` 与 `renderEpgForCurrent()` 里
+`epgColumn.render(epg)` 之后各调一次。
+
+`Snackbar`：半径 8→10f、`bottomMargin` 28→24dp，与面板同网格。
+
+### 像素级验证（`screenshot_px = dp × 1.3333`）
+
+模拟器 `wm size` 是 Physical 1280×720 / **Override 1920×1080**，应用视口 1920×1080、
+`wm density` 320 —— 视口 dpi ÷ 屏幕 dpi = 4/3，**所以截图里 1dp = 1.3333px**。
+
+| 项 | 理论 | 实测 | 结论 |
+|---|---|---|---|
+| 状态 0 面板右缘 | 24+140+280 = 444dp → 592px | **591px** | ✔ 24dp 留白生效 |
+| 状态 1 面板右缘 | 280+280 = 560dp → 747px | **746px** | ✔ 节目单列已从 420dp 收窄 |
+| v1.11 状态 0/1（基线） | — | 32..591（419dp）同宽 | — |
+| v1.12 状态 1 | — | 0..746（560dp） | 第三列不再是 420dp |
+
+> **`panelMaxH` 故意没动。** 量到面板下缘在截图 y=617、底部卡片上缘 y=531 → 重叠 86px
+> （86/1.3333 ≈ 65dp，比 24dp 下边距大）。但用户自己的截图 `/tmp/shots/user-bottom.png`
+> 里**同一位置也有同样的重叠**（底部卡片 `湖北卫视 | 1/10 | HD | 立…` 压着面板），
+> 说明这是**早就存在且已被接受的观感**；缩小面板还会与更早的「菜单整体做大」明确要求冲突。
+
+## 需求 3：两处开发话术清理
+
+### 3a 点「回放」弹出的占位文案
+
+原文案 `回放：下午茶剧场:战火青春(12) （回放链路属 M7 之外的范围）` 删除，
+`onEpgProgrammeClick(p)` 改为**有真回看线路就用真线路**：
+
+```kotlin
+val catchUp = currentChannel?.urlList?.firstOrNull { u ->
+    val l = u.lowercase()
+    l.contains("tvod") || l.contains("playseek")
+}
+if (catchUp != null && ::player.isInitialized) {
+    player.play(listOf(catchUp))
+    channelStartedAt = SystemClock.uptimeMillis()
+    Snackbar.show("回看：${p.title}", this)
+} else {
+    Snackbar.show("《${p.title}》已结束 · 本频道不支持回看", this)
+}
+```
+
+为什么是"找现成的 `tvod`/`playseek`"而不是"拼参数"：**真做过实验**
+（`/tmp/probe2.py`，拿用户自己的源 URL 打）。`&starttime=&endtime=`、`&playseek=`、
+`PLTV→tvod` 改路径三种拼法返回的 m3u8 与直播 URL **逐字节相同**
+（同 md5 `4f3c25a0b258`、同切片号 `live_1004_1_1365472.ts`）—— **这些服务器直接忽略回看参数**。
+换个"当前时间"的时戳再打，返回的是**更新的直播切片**，进一步证明它只是直播。
+结论：靠猜参数伪造回看不可能，唯一可靠信号就是源里**本来就带**的 `tvod`/`playseek` URL。
+
+### 3b 二级菜单往下滑弹「节目单界面将在 M7 接入」
+
+`onQuickOpAction` 的 `EPG` 分支把 Snackbar **整条删掉**，改为直接展开节目单列：
+
+```kotlin
+QuickOpView.Action.EPG -> {
+    quickOp.close()
+    if (panel.visibility != View.VISIBLE) showPanel()
+    setPanelExpanded(true)
+    UiLog.i("界面", "快捷菜单「节目单」→ 展开节目单列（状态 1）")
+}
+```
+
+### 产物层核验（这类文案必须证明"无法显示"，不是"改过了"）
+
+release / debug 两个 APK 的 dex 字符串表逐条查：
+
+| 字符串 | 期望 | 实测 |
+|---|---|---|
+| `回放链路属 M7 之外的范围` | 不存在 | ✔ 无 |
+| `节目单界面将在 M7 接入` | 不存在 | ✔ 无 |
+| `无法创建下载目录` | 不存在 | ✔ 无 |
+| `潮剧` | 存在 | ✔ 有 |
+| `本频道不支持回看` | 存在 | ✔ 有 |
+| `无法找到可写的下载目录` | 存在 | ✔ 有 |
+| `自动连播：第 ` | 存在 | ✔ 有 |
+
+## 需求 4：触屏 —— 点开节目表后滑不回一级菜单
+
+**根因**：`onScreenSwipe()` 里一条扁平守卫 `if (panel.visibility == View.VISIBLE) return`
+—— 只要面板在屏，**屏幕上任何手势都不处理**，所以面板一展开就只剩返回键一条路。
+
+**改法**：换成"面板内导航"分支，与遥控器左右键语义完全一致（`onPanelRight` / `onPanelLeft`）：
+
+```kotlin
+if (panel.visibility == View.VISIBLE) {
+    val adxP = Math.abs(dx); val adyP = Math.abs(dy)
+    if (adxP < SWIPE_MIN_PX || adxP <= adyP) return   // 只认横向滑
+    if (now - lastSwipeAt < 500L) return              // 去抖
+    if (panel.isAnimating) return
+    lastSwipeAt = now
+    if (dx < 0) enterPanelDeeper() else leavePanelOneLevel()
+    return
+}
+```
+
+新增 `enterPanelDeeper()` / `leavePanelOneLevel()`（触屏版 `onPanelRight()` / `onPanelLeft()`）。
+前者先守 `epgColumn.hasProgrammes()`，把焦点移到 `channelColumn`，再
+`epgVisible = true; refreshPanelState()`，然后 `epgColumn.focusProgrammeList()`、
+`epgFocused = true`、`refreshPanelState()`，最后 `handler.postDelayed(epgFocusRetry, 260L)`；
+后者 `epgFocused → false` / `epgVisible → false` / `else -> hidePanel()`。
+
+**实测日志（完整链路）**：
+
+```
+手势：面板内左滑 → 深入一层（当前状态 0）
+界面：三段式状态 → 1（位移 -328px）
+手势：面板内右滑 → 退回一层（当前状态 1）
+界面：三段式状态 → 0（位移 0px）
+手势：面板内右滑 → 退回一层（当前状态 0）
+...MainActivity.leavePanelOneLevel:3913 <- MainActivity.onScreenSwipe:1571
+界面：hidePanelFinish 执行 → 置 GONE
+```
+
+截图 `/tmp/shots12/10-panel.png`（状态 0）、`/tmp/shots12/11-deep.png`（状态 1，
+含完整节目单列表、回放/预约尾标、当前节目上的 ▶ 标记）确认渲染正确。
+
+> 附带发现：面板是靠**点屏幕左侧 32% 区域**唤醒的
+> （`x < resources.displayMetrics.widthPixels * 0.32f`），第一次测试点屏幕正中一直不出面板就是这么来的。
+> 另：**v1.11 笔记里"screencap 在这台模拟器上是坏的"这条本轮被推翻** ——
+> `adb shell screencap -p /data/local/tmp/x.png` + `adb pull` 完全可用（只是 `exec-out` 仍返回 0 字节）。
+
+## 需求 5（中途追加）：小米电视更新失败
+
+**现象**（用户 IMG_9193）：小米电视上点更新报
+`无法创建下载目录：/storage/emulated/0/Android/data/top.yogiczy.mytv.legacy.debug/files/update`。
+
+**根因**：`UpdateRepository` 只用 `getExternalFilesDir(null)/update` 一个目录，建不出来就**单点硬失败**。
+
+**改法**：`resolveDownloadDir(ctx)` —— 5 个候选目录**按顺序试**，每个都跑**真实写探针**：
+
+```kotlin
+private fun probeWritable(dir: File): String? {
+    if (!dir.exists() && !dir.mkdirs() && !dir.exists()) return "无法创建目录"
+    if (!dir.isDirectory) return "同名路径不是目录"
+    val probe = File(dir, ".wprobe")
+    return try { FileOutputStream(probe).use { it.write(0) }; probe.delete(); null }
+    catch (t: Throwable) { "${t.javaClass.simpleName}: ${t.message}" }
+}
+```
+
+之所以要真写一次：`mkdirs()` **返回 true 但随后写入仍可能 `EACCES`**（部分定制 ROM 的
+`Android/data` 就是这样），只看 `mkdirs()` 返回值会继续踩同一个坑。
+
+候选顺序：`getExternalFilesDir(null)/update` →
+`Environment.getExternalStorageDirectory()/Android/data/<pkg>/files/update` →
+`filesDir/update` → `externalCacheDir/update` → `cacheDir/update`。
+
+失败提示也分流：
+
+```kotlin
+val hint = when {
+    reason == "已取消" -> ""
+    reason.contains("下载目录") || reason.contains("创建目录") ->
+        "\n本机存储不可写，请清理空间或检查电视的存储权限后重试"
+    else -> "\n若多次失败，请确认本机网络能访问 GitHub（可在路由器上放行或改用热点重试）"
+}
+```
+
+另修一条同源问题：**API < 24 走 `file://` 交给系统安装器时，`/data/data` 下的包安装器读不到**，
+`installApk(file)` 的 `else` 分支补上放开读权限（父目录 + 文件本身）：
+
+```kotlin
+runCatching {
+    file.parentFile?.setExecutable(true, false)
+    file.parentFile?.setReadable(true, false)
+    file.setReadable(true, false)
+}.onFailure { UiLog.w("界面", "安装包放开读权限失败：${it.javaClass.simpleName}") }
+```
+
+## 本轮踩到的坑（复用结论）
+
+- **Kotlin 不允许在同一个解构声明的 elvis 分支里引用被解构的变量**：写成
+  `val (dir, why) = f(ctx) ?: return null to "...$why"` 会报
+  `Unresolved reference: why`。拆成两条语句即可。
+- **改 `download()` 时一度把 `onProgress` 的签名从 `(Float) -> Boolean` 顺手改成了
+  `(Float) -> Unit`** —— 这类"顺手改签名"的副作用要立刻回滚，返回值是取消信号。
+- `adb logcat -d -s "MyTVLegacy:*"` 在 zsh 里**必须给参数加引号**，否则
+  `no matches found: MyTVLegacy:*`；用 Python 过滤时要
+  `sys.stdin.buffer.read().decode('utf-8','replace')`，直接 `decode('utf-8')` 会撞 0xed。
+- **`input keyevent --longpress 23` 在 API 19 上不成立**（打不开快捷菜单）；
+  v1.10 笔记里的"长按可用"只对方向键成立，确认键这个组合不行。
+- **触摸点 `RecyclerView` 行在面板里点不动**（测潮剧源行时遇到），
+  可靠路径是遥控器链：RIGHT 进中栏 → DOWN×N → CENTER。
+- **`grep -rn --include=*.kts` 在 zsh 里报 `no matches found`**，改用 Grep 工具。
+- `app/build.gradle` 不存在（是 `.kts`），按 `.gradle` 找 `versionName` 会一无所获。
+- 一次 `glob.glob('/Users/nid/**/clipboard-*', recursive=True)` 扫整个家目录**被 SIGTERM 杀掉**
+  （exit 137）—— 找剪贴板截图要指定具体目录，别全盘 glob。
+
+## 产物（v1.12，versionCode 17）
+
+- `dist/MyTV4.4-v1.12-legacy17.apk`（release 10,334,270 B，MD5 `a202ef278701af18bfd513b990a2afdb`，已签名）
+- `dist/MyTV4.4-v1.12-legacy17-debug.apk`（debug 12,901,887 B，MD5 `42952f1febc018ec1c9a090ec55d9e50`）
+- `update/version.json` → v1.12 清单
+- `bash ./gradlew :app:assembleRelease :app:assembleDebug --offline` → `BUILD SUCCESSFUL in 4m 37s`，
+  83 tasks，`lintVitalRelease` 通过
+- 签名核对：release `versionCode='17' versionName='1.12-legacy.17'`、`targetSdkVersion:'28'`、
+  `application-label:'MyTV4.4'`、SHA-256 `02e143e8102283c2a3d26c505ea5fa44962ff84115eb598cbed467c97236f7c2`；
+  debug 包名 `top.yogiczy.mytv.legacy.debug` 独立签名
+- 多 dex 确认：release = `classes.dex 8,377,144B` + `classes2.dex 589,304B` + `classes3.dex 2,624,064B`

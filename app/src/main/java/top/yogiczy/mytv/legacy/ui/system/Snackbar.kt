@@ -55,7 +55,8 @@ object Snackbar {
             text = message
             setTextColor(Palette.onSurface(act))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            background = UiKit.rounded(UiKit.withAlpha(Palette.surfaceContainerHigh(act), 0.96f), 8f, act)
+            // v1.12 需求 2：圆角并入浮层统一的 10dp（原来 8dp，与面板/快捷菜单的 10dp 不一致）
+            background = UiKit.rounded(UiKit.withAlpha(Palette.surfaceContainerHigh(act), 0.96f), 10f, act)
             setPadding(dp(act, 18f), dp(act, 10f), dp(act, 18f), dp(act, 10f))
             maxLines = 2
         }
@@ -69,7 +70,8 @@ object Snackbar {
             ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply {
             gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            bottomMargin = dp(act, 28f)
+            // v1.12 需求 2：并入 24dp 网格（原来 28dp，与底栏/面板的 24dp 对不齐）
+            bottomMargin = dp(act, 24f)
         }
         root.addView(tv, lp)
         tv.alpha = 0f

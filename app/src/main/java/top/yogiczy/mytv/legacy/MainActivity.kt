@@ -732,7 +732,12 @@ class MainActivity : AppCompatActivity() {
         showQuickMenu()
     }
 
-    // ---- 以下三个是 M6/M7/M8 的入口占位：**必须存在**（原版有），本轮只提示不实现 ----
+    // ---- 原版三个"长按"入口 ----
+    // 说明：这三个函数名里的 `Placeholder` 是历史遗留（M6 初期它们确实只是提示占位），
+    // 现均已接真实行为，函数名保留是为了不动调用点。
+    //   · 长按左键 → 独立 EPG 弹层
+    //   · 长按右键 → 多线路选框
+    //   · 长按下键 → 播放控制弹层
 
     /** 原版 `onLongLeft`：长按左键 → 独立 EPG 弹层（M7）。 */
     /** 长按左键 → 独立 EPG 弹层（原版 `EpgScreen` 的 Drawer 形态）。 */
@@ -804,6 +809,8 @@ class MainActivity : AppCompatActivity() {
                 "节目数=${epg?.programmeList?.value?.size}"
         )
         epgColumn.render(epg)
+        // v1.12 需求 2：render 之后日期列的显隐可能变了（跨天 / 不跨天），列宽要跟着重算
+        syncEpgColumnWidth()
 
         // 判据 4（1.7 ChannelInfo）：当前节目（时间段 + 进度 + 剩余 + 名）+ 下一个节目（时间段 + 名）
         val list = epg?.programmeList?.value.orEmpty()
@@ -918,8 +925,32 @@ class MainActivity : AppCompatActivity() {
         val now = System.currentTimeMillis()
         when {
             p.endAt < now -> {
-                Log.i(Keys.TAG, "节目单：请求回放《${p.title}》")
-                Snackbar.show("回放：${p.title}（回放链路属 M7 之外的范围）", this)
+                // v1.12 需求 3a：原来这里弹的是**开发话术**
+                //   「回放：xxx（回放链路属 M7 之外的范围）」
+                //
+                // 实测结论（2026-10-14 对照实验，取用户自建源 6 个 tsfile/live 地址）：
+                //   靠"猜参数"造回看是**不成立**的 —— `&starttime=&endtime=`、`&playseek=`、
+                //   PLTV→tvod 三种写法服务器一律**忽略**，返回的 m3u8 与直播原址 md5 完全一致
+                //   （连分段号都一样），也就是照样在播直播。做这种假回看只会更糟。
+                //
+                // 真正**可用**的回看信号只有一个：源里本来就带 tvod / playseek 回看线路
+                // （上游 1.7 也只做到给这类地址打一个「回放」标签，并未实现回看本身）。
+                // 所以这里：有回看线路就真播，没有就老实说一句 —— 不再暴露内部编号。
+                val catchUp = currentChannel?.urlList?.firstOrNull { u ->
+                    val l = u.lowercase()
+                    l.contains("tvod") || l.contains("playseek")
+                }
+                if (catchUp != null && ::player.isInitialized) {
+                    Log.i(Keys.TAG, "节目单：回看《${p.title}》（走源内的回看线路）")
+                    UiLog.i("界面", "节目单回看《${p.title}》→ ${catchUp.take(80)}")
+                    player.play(listOf(catchUp))
+                    // 起播时刻复位，避免回看刚起播就被判成"只播了几秒"的异常线路
+                    channelStartedAt = SystemClock.uptimeMillis()
+                    Snackbar.show("回看：${p.title}", this)
+                } else {
+                    Log.i(Keys.TAG, "节目单：《${p.title}》已结束，当前频道没有回看线路")
+                    Snackbar.show("《${p.title}》已结束 · 本频道不支持回看", this)
+                }
             }
               p.startAt > now -> {
                   // M10：预约真正落库（M9 遗留）
@@ -1477,14 +1508,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * v1.7（用户要求）：全屏画面上的滑动手势（面板/弹层都不在屏时才生效）——
-     *  · **上滑 = 下一频道，下滑 = 上一频道**（跨分组循环，与遥控器上下键同一条链路）；
-     *  · **左滑 = 下一条线路，右滑 = 上一条线路**（多线路频道才有动作）。
+     * v1.7（用户要求）：全屏画面上的滑动手势。
+     *  · **面板收起时**：上滑 = 下一频道 / 下滑 = 上一频道（跨分组循环）；
+     *    左滑 = 下一条线路 / 右滑 = 上一条线路（多线路频道才有动作）。
+     *  · **面板展开时**（v1.12 需求 4）：横向滑在三段式里进出层级 ——
+     *    左滑深入（频道列 + 节目单列），右滑退回（最后一步收起面板）。
+     *    面板内**不响应竖向滑**，留给列里的列表自己滚。
      *
      * v1.9（用户需求 4）：**左右滑的方向按用户反馈对调**。
      * 原来是「右滑 = 下一条 / 左滑 = 上一条」，用户反馈"不符合直觉"。
      * 现在按"翻页"的直觉：**手指向左划 = 往后翻（下一条），向右划 = 往前翻（上一条）**。
      * 遥控器左右键**没动**（右键 = 下一条仍是标准语义）—— 用户只提了滑动手势。
+     * 面板内的层级切换沿用同一套直觉（左滑 = 往后翻 = 深入，右滑 = 往前翻 = 退回）。
      *
      * 用 onFling（要有初速度）而不是 onScroll：慢慢拖动 EPG 列表不会误触发换台。
      * 防抖只挡 500ms 内的重复触发（一次 fling 的 DOWN/UP 序列不会重复回调），
@@ -1503,8 +1538,41 @@ class MainActivity : AppCompatActivity() {
         if (updateProgress != null) return          // v1.8：更新下载进度层在屏时不生效
         if (linePicker != null) return              // v1.9：多线路选框在屏时不生效
         if (playerControl != null) return           // v1.9：播放控制弹层在屏时不生效
-        if (panel.visibility == View.VISIBLE) return
+
         val now = android.os.SystemClock.uptimeMillis()
+
+        // ------------------------------------------------------------------
+        // v1.12 需求 4：**面板开着时**左右滑 = 在三段式里进出层级
+        // ------------------------------------------------------------------
+        // 老代码这里是一句光秃秃的 `if (panel.visibility == View.VISIBLE) return` ——
+        // 面板一开，**任何**手势全部失效。于是触屏用户点开节目表之后
+        // "滑不回一级菜单"，只能去够屏幕边缘的返回键（用户截图反馈的就是这个）。
+        // 按键模式早就有等价实现（[onPanelRight] / [onPanelLeft]），手势这边只是缺一条分支。
+        //
+        // 方向沿用 v1.9 定下的"翻页"直觉：
+        //   · **向左划 = 往后翻 = 深入一层**：分组栏 →（展开）频道列+节目单列 → 聚焦节目单列
+        //   · **向右划 = 往前翻 = 退回一层**：节目单列 → 频道列+分组栏 → 收起整个面板
+        //
+        // ⚠️ 只认"横向"滑：竖向位移更大的手势要原样留给列里的 ScrollView / RecyclerView
+        // 自己滚，所以判定顺序是**先看方向、再看防抖** —— 竖向拖动不会白白吃掉防抖窗口。
+        // ⚠️ 还要避开动画重叠：面板位移要 180ms，期间再切状态会被 PanelHost 直接丢弃。
+        if (panel.visibility == View.VISIBLE) {
+            val adxP = Math.abs(dx)
+            val adyP = Math.abs(dy)
+            if (adxP < SWIPE_MIN_PX || adxP <= adyP) return
+            if (now - lastSwipeAt < 500L) return
+            if (panel.isAnimating) return
+            lastSwipeAt = now
+            if (dx < 0) {
+                UiLog.i("手势", "面板内左滑 → 深入一层（当前状态 ${panel.currentState}）")
+                enterPanelDeeper()
+            } else {
+                UiLog.i("手势", "面板内右滑 → 退回一层（当前状态 ${panel.currentState}）")
+                leavePanelOneLevel()
+            }
+            return
+        }
+
         if (now - lastSwipeAt < 500L) return        // 防抖：连续 fling 只认第一次
         lastSwipeAt = now
 
@@ -1669,8 +1737,9 @@ class MainActivity : AppCompatActivity() {
     /**
      * 7 个按钮的动作。
      *
-     * ⚠️ 如实标注实现状态：「投屏」属 M11、「更多设置」属 M9，本轮**未实现**，
-     * 只弹提示条说明 —— 不假装已实现。其余 5 项已接真实行为。
+     * 实现状态（v1.12 复核）：**7 项全部接真实行为**。
+     * 曾经有 3 项只弹「将在 Mx 接入」的提示条（投屏 / 节目单 / 多线路 / 播放控制），
+     * 现已分别由 v1.8 的 DLNA、v1.9 的线路选框与播放控制弹层、v1.12 的节目单列补齐。
      */
     private fun onQuickOpAction(action: QuickOpView.Action) {
         when (action) {
@@ -1680,10 +1749,16 @@ class MainActivity : AppCompatActivity() {
             }
 
             QuickOpView.Action.EPG -> {
+                // v1.12 需求 3b：这里过去在展开面板之后还弹一句
+                //   「节目单界面将在 M7 接入」
+                // 但**节目单界面早就接入了** —— setPanelExpanded(true) 会把 epgVisible 置真，
+                // refreshPanelState() 随即把三段式推到状态 1（频道列 + 节目单列），
+                // 那句话说白了是过期的残留，用户看到只会以为功能没做。
+                // 现在直接不弹：动作本身就是正确结果。
                 quickOp.close()
                 if (panel.visibility != View.VISIBLE) showPanel()
                 setPanelExpanded(true)
-                Snackbar.show("节目单界面将在 M7 接入", this)
+                UiLog.i("界面", "快捷菜单「节目单」→ 展开节目单列（状态 1）")
             }
 
             QuickOpView.Action.CHANNEL_URL -> {
@@ -1743,14 +1818,14 @@ class MainActivity : AppCompatActivity() {
 
         root.addView(buildTopRight(), FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { gravity = Gravity.TOP or Gravity.END; topMargin = s(18f); rightMargin = s(28f) })
+        ).apply { gravity = Gravity.TOP or Gravity.END; topMargin = s(panelEdgeDp); rightMargin = s(panelEdgeDp) })
 
         // 原版 `DatetimeScreen`：独立的"只显示时间"图层，位置与右上角信息块重合，
         // 但两者**互斥**（见 refreshDatetime）—— 默认 HIDDEN 时这一层根本不出现。
         datetime = DatetimeView(this)
         root.addView(datetime, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { gravity = Gravity.TOP or Gravity.END; topMargin = s(18f); rightMargin = s(28f) })
+        ).apply { gravity = Gravity.TOP or Gravity.END; topMargin = s(panelEdgeDp); rightMargin = s(panelEdgeDp) })
 
         // 判据 1：底栏必须留引用 —— 原来直接内联 addView，导致它永远无法被隐藏。
         bottomBar = buildBottomBar()
@@ -1772,7 +1847,7 @@ class MainActivity : AppCompatActivity() {
         // 否则展开时分组栏会留一条 24dp 的"残边"贴在屏幕左边（真机截图就是这个现象）。
         root.addView(buildPanel(), FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; topMargin = s(16f); leftMargin = s(panelLeftMarginDp) })
+        ).apply { gravity = Gravity.TOP or Gravity.START; topMargin = s(panelEdgeDp); leftMargin = s(panelEdgeDp) })
 
         // 快捷菜单是全屏半透明遮罩（原版 `QuickOpScreen` 的
         // `background.copy(alpha = 0.5f)` + `fillMaxSize`），因此必须是 MATCH_PARENT/MATCH_PARENT，
@@ -1831,7 +1906,9 @@ class MainActivity : AppCompatActivity() {
             epgProgress = EpgProgressView(this)
           root.addView(epgProgress, FrameLayout.LayoutParams(
               ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-          ).apply { gravity = Gravity.BOTTOM or Gravity.START; bottomMargin = s(76f); leftMargin = s(28f) })
+          // v1.12 需求 2：左边距并入 24dp 网格（原来 28dp，与面板/底栏的 24dp 差 4dp）。
+          // bottomMargin 保持 76dp —— 它要压在底栏之上，不是网格值。
+          ).apply { gravity = Gravity.BOTTOM or Gravity.START; bottomMargin = s(76f); leftMargin = s(panelEdgeDp) })
 
           // v1.8：调试叠加层（FPS / 播放器信息 / 布局网格，由设置页「调试」三项控制）
           debugOverlay = DebugOverlayView(this)
@@ -1850,7 +1927,7 @@ class MainActivity : AppCompatActivity() {
             visibility = View.GONE
             panelMaxH = this@MainActivity.panelMaxH
             // 判据「菜单没必要左移」：面板自身左边距要计入位移，否则分组栏移不干净。
-            offscreenExtraPx = s(panelLeftMarginDp)
+            offscreenExtraPx = s(panelEdgeDp)
         }
 
           // M10：分组栏改为 `ui/panel/NavColumnView`（继承 LinearLayout，接口不变）。
@@ -1909,22 +1986,25 @@ class MainActivity : AppCompatActivity() {
 
             // M6：列宽必须**实测**后回填，不能拿 s(112f) 之类的设计值硬算位移 ——
           // 一旦列宽随 Density 变化，硬编码就会让三态位移错位（原版用 onSizeChanged 同理）。
-          val navWrap = wrap(navColumn, s(140f)).apply { background = columnBg(true) }
+          val navWrap = wrap(navColumn, s(140f)).apply { background = columnBg() }
           // ⚠️ 中栏**不能**再套 ScrollView：RecyclerView 自己管滚动，套两层会导致
           // 高度测量异常（表现为整列只显示一行）。直接按 panelMaxH 给高度。
           channelColumn.layoutParams = LinearLayout.LayoutParams(s(280f), panelMaxH)
-          channelColumn.background = columnBg(false)
+          channelColumn.background = columnBg()
           val chWrap = channelColumn
         // M7：第三列内部自己滚动（含 RecyclerView），不再套 ScrollView（同中栏的理由）
         val epgWrap = epgColumn
         // 判据 2A：第三列此前**完全没有背景**（只给了 layoutParams），于是节目表悬在画面上
         // 没有面板底。原版第三列是独立的深色半透明面板底，这里与中栏用同一套 columnBg。
-        epgColumn.background = columnBg(false)
+        epgColumn.background = columnBg()
         // 判据 1（用户）：初始 state=0（未展开）→ 第三列不显示（含竖提示）
         epgColumn.visibility = View.GONE
-          // ⚠️ 宽度要按「节目列表 + 日期列」的总宽给：原版是 268/340dp + 80dp。
-          // 若仍按 248dp，日期列会被挤出可视区（M7 实测：dump 里根本找不到它）。
-          epgColumn.layoutParams = LinearLayout.LayoutParams(s(420f), panelMaxH)
+          // ⚠️ 宽度要按「节目列表 + 日期列」的**实际内容**给。
+          // v1.12 需求 2（整体视觉对齐）：此前写死 420dp（= 聚焦 340 + 日期列 80，最宽组合），
+          // 不聚焦时内容只有 280dp，右边就多出一条 140dp 的**空面板底**。
+          // 现在交给 EpgColumnView.desiredWidthPx() 按当前聚焦/跨天状态算，
+          // 并在每次状态切换后重算（见 panel.onStateChanged 与 syncEpgColumnWidth）。
+          epgColumn.layoutParams = LinearLayout.LayoutParams(epgColumn.desiredWidthPx(), panelMaxH)
           navWrapRef = navWrap
           chWrapRef = chWrap
           epgWrapRef = epgWrap
@@ -1934,6 +2014,8 @@ class MainActivity : AppCompatActivity() {
           panel.epgRef = epgWrap
             panel.onStateChanged = { st ->
                 epgColumn.setFocused(st == 2)
+                // v1.12 需求 2：宽度随聚焦/跨天状态重算（必须在位移之前算好，避免动画中布局跳动）
+                syncEpgColumnWidth()
                 // 判据 1（用户）：节目表**没点开时不要显示**第三列（连"向右查看节目单"竖提示一起），
                 // 面板只占"分组栏 + 中栏"两列宽；点开（state ≥ 1）才出现。
                 epgColumn.visibility = if (st == 0) View.GONE else View.VISIBLE
@@ -1968,8 +2050,32 @@ class MainActivity : AppCompatActivity() {
           if (c > 0) channelW = c
       }
 
-    private fun columnBg(left: Boolean) = UiKit.rounded(
-        UiKit.withAlpha(Palette.surface(this@MainActivity), 0.94f), if (left) 10f else 8f, this)
+      /**
+       * v1.12 需求 2（整体视觉对齐）：把第三列的宽度重新对齐到它的**实际内容**。
+       *
+       * 需要在两种时机各调一次：
+       *   ① 三段式状态变化（268 ↔ 340 的列表宽度切换）；
+       *   ② 节目单重新渲染之后 —— 跨天时日期列会显隐，列宽要跟着变。
+       * 宽度本身由 `EpgColumnView.desiredWidthPx()` 决定（它知道自己的内边距与日期列状态）。
+       */
+      private fun syncEpgColumnWidth() {
+          if (!::epgColumn.isInitialized) return
+          val want = epgColumn.desiredWidthPx()
+          val lp = epgColumn.layoutParams as? LinearLayout.LayoutParams
+          if (lp != null && lp.width == want) return
+          epgColumn.layoutParams = LinearLayout.LayoutParams(want, panelMaxH)
+      }
+
+    /**
+     * 三列共用的面板底。
+     *
+     * v1.12 需求 2（整体视觉对齐）：原来左列圆角 10f、其余 8f —— 三个圆角**不一致**，
+     * 排在一起时左列的角会明显更钝。现在统一 10dp（浮层统一圆角）。
+     * 透明度也统一 0.94：直播画面在面板下面透出来是正常的（原版也是半透明），
+     * 但三列**必须一致**，否则相邻两列之间会出现一条可见的色阶。
+     */
+    private fun columnBg() = UiKit.rounded(
+        UiKit.withAlpha(Palette.surface(this@MainActivity), 0.94f), 10f, this)
 
     /**
      * 面板最大高度（三列共用）。
@@ -1977,15 +2083,23 @@ class MainActivity : AppCompatActivity() {
      * 问题 1「菜单整体做大」：原版 1.7 的三段式是**近乎满屏**的
      * （`Box(fillMaxSize).padding(24.dp)` 里的 `fillMaxHeight()`），
      * 本工程此前只给了 0.66，显得矮了一截。这里提到 0.80 —— 留出面板自身的
-     * 16dp 上边距与下方空间（真机上 `displayMetrics.heightPixels` 含被隐藏的导航栏，
-     * 取太大面板底部会被切掉）。
+     * 24dp 外边距（见 [panelEdgeDp]）与下方空间（真机上 `displayMetrics.heightPixels`
+     * 含被隐藏的导航栏，取太大面板底部会被切掉）。
      */
     private val panelMaxH: Int by lazy {
         (resources.displayMetrics.heightPixels * 0.80f).toInt()
     }
 
-    /** 三段式面板自身的左边距（dp）。位移计算与 LayoutParams 必须共用同一个值。 */
-    private val panelLeftMarginDp = 24f
+    /**
+     * 三段式面板的**外边距（dp）**：上下左右统一用它。
+     *
+     * v1.12 需求 2（整体视觉对齐）：此前左 24 / 上 16 —— 面板贴着屏幕顶部比左边更近，
+     * 视觉上会显得"顶到了"。现在统一到一条 24dp 网格（右上角信息块、
+     * 底部节目进度、快捷菜单的内边距也都按 24dp 对齐）。
+     *
+     * ⚠️ 位移计算与 LayoutParams 必须共用同一个值，所以保留这个常量而不是就地写死。
+     */
+    private val panelEdgeDp = 24f
 
     private fun wrap(col: View, w: Int): ScrollView = ScrollView(this).apply {
         isVerticalScrollBarEnabled = false
@@ -2063,7 +2177,7 @@ class MainActivity : AppCompatActivity() {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.END
-            // 底色：与 PanelHost.columnBg 同源的深色，0.8 透明度（原版 surface.copy(0.8f)）
+            // 底色：与三段式面板同源的深色（见 columnBg），0.8 透明度（原版 surface.copy(0.8f)）
             background = UiKit.rounded(
                 UiKit.withAlpha(Palette.surface(this@MainActivity), 0.8f), 10f, this@MainActivity
             )
@@ -2904,8 +3018,20 @@ class MainActivity : AppCompatActivity() {
      * 触发点是 [PlayerController.onEnded]（`STATE_ENDED`）—— **直播永远不会到 ENDED**，
      * 所以这个回调本身就已经是"这是个能播完的点播内容"的判据，不需要再去猜源的类型。
      *
-     * 顺序（用户要求"一个视频播完自动接下一个，同分组播完接下一分组"）：
-     *   同分组下一个 → 组末则下一分组的第一个 → 已经是最后一组最后一个则停止（不回头循环）。
+     * 顺序（v1.12 用户需求 1 定稿）：
+     *   ① **同一节目内还有下一条线路 → 接线路 N+1**（新增）
+     *   ② 本节目线路全走完 → 同分组下一个频道
+     *   ③ 组末 → 下一分组的第一个频道
+     *   ④ 已经是最后一组最后一个 → 停止（不回头循环）
+     *
+     * 为什么 ① 要排在最前：潮剧 / 潮汕回放这类 txt 源的结构是
+     * `剧目名,#genre#` → `剧团版本,第1集#第2集#…#第N集`，
+     * 即 **一个频道 = 一个剧团版本，它的 N 条线路 = N 集**，
+     * 线路就是集数，必须先把本频道内的线路播完才轮到下一个节目。
+     *
+     * 注意：这个规则对内置的直播源（自建源 / 虎牙 / 斗鱼 / YY轮播）**完全无副作用** ——
+     * 它们是 10 条镜像线路的直播流，`STATE_ENDED` 永不触发，走不到这里
+     * （已实测核对：自建源 56 个频道里 54 个是 10 线路的直播 m3u8/flv）。
      */
     private fun onPlaybackEnded() {
         if (!Prefs.iptvAutoPlayNext(this)) {
@@ -2922,6 +3048,27 @@ class MainActivity : AppCompatActivity() {
         if (channelStartedAt > 0L && played < MIN_AUTO_NEXT_PLAY_MS) {
             UiLog.i("播放", "点播播完：本次仅 ${played / 1000}s（<${MIN_AUTO_NEXT_PLAY_MS / 1000}s），判为线路异常，不连播")
             return
+        }
+
+        // ① v1.12 需求 1：同一节目（频道）内优先接着播下一条线路
+        if (::player.isInitialized) {
+            val li = player.currentLineIdx
+            val ln = player.lineCount
+            if (ln > 1 && li in 0 until ln - 1) {
+                val nextLine = li + 1
+                lastAutoNextAt = now
+                UiLog.i("播放", "点播播完自动连播 → 《${cur.name}》第 ${nextLine + 1}/${ln} 条线路（本节目内续播）")
+                Snackbar.show("自动连播：第 ${nextLine + 1}/${ln} 条线路", this)
+                player.switchLine(nextLine)
+                // 换线路 = 重新起播，起播时刻复位（与 changeLineBy 一致，否则下一集会被
+                // MIN_AUTO_NEXT_PLAY_MS 误判成"只播了几秒"）
+                channelStartedAt = SystemClock.uptimeMillis()
+                showTempChannelInfo()
+                return
+            }
+            if (ln > 1) {
+                UiLog.i("播放", "点播播完：《${cur.name}》${ln} 条线路已全部播完，转下一个节目")
+            }
         }
 
         val groups = groupList.groups
@@ -3124,10 +3271,15 @@ class MainActivity : AppCompatActivity() {
                     // v1.11（用户需求 3b）：失败原因按线路逐条列出（"所有下载线路都不可用"
                     // 时要让用户知道是网络问题还是线路问题），并在末尾给一句可执行的建议。
                     val reason = err ?: "下载失败"
-                    updateProgress?.setFailed(
-                        if (reason == "已取消") reason
-                        else "$reason\n若多次失败，请确认本机网络能访问 GitHub（可在路由器上放行或改用热点重试）"
-                    )
+                    // v1.12 需求 5：区分「存储问题」和「网络问题」—— 存储问题给 GitHub 建议
+                    // 是驴唇不对马嘴（小米电视那次报的就是存储问题）。
+                    val hint = when {
+                        reason == "已取消" -> ""
+                        reason.contains("下载目录") || reason.contains("创建目录") ->
+                            "\n本机存储不可写，请清理空间或检查电视的存储权限后重试"
+                        else -> "\n若多次失败，请确认本机网络能访问 GitHub（可在路由器上放行或改用热点重试）"
+                    }
+                    updateProgress?.setFailed(reason + hint)
                     UiLog.w("界面", "更新下载失败：$reason")
                 } else {
                     pendingInstallApk = file
@@ -3154,11 +3306,23 @@ class MainActivity : AppCompatActivity() {
      *
      * API 24 起不允许把 `file://` 交给别的应用（`FileUriExposedException`），必须走
      * `FileProvider` 的 `content://`；API 19~23 用 `file://` 即可。两条路都保留。
+     *
+     * v1.12 需求 5：API < 24 走 `file://` 时，安装器是**另一个进程/应用**，
+     * 它要真的能打开这个文件 —— 而 [UpdateRepository.resolveDownloadDir] 的兜底候选
+     * 可能落在 `/data/data/<pkg>/files/update`（内部私有目录，默认 0700）。
+     * 所以这里必须把**父目录放开可进入、文件放开可读**（`setReadable(true, false)`），
+     * 否则会出现"下载成功了，点安装却没反应/提示解析失败"。
      */
     private fun installApk(file: java.io.File) {
         val uri = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
             androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
         } else {
+            // API 19~23：file:// 直接给安装器，必须自己把权限放开
+            runCatching {
+                file.parentFile?.setExecutable(true, false)   // 目录要能"进入"
+                file.parentFile?.setReadable(true, false)
+                file.setReadable(true, false)                 // 文件要能被别的应用读
+            }.onFailure { UiLog.w("界面", "安装包放开读权限失败：${it.javaClass.simpleName}") }
             android.net.Uri.fromFile(file)
         }
         val intent = Intent(Intent.ACTION_VIEW).apply {
@@ -3687,6 +3851,66 @@ class MainActivity : AppCompatActivity() {
                 hidePanel()
                 return true
             }
+        }
+    }
+
+    // ---------------- v1.12 需求 4：面板内的触屏层级切换 ----------------
+    //
+    // 这两支是按键版 [onPanelRight] / [onPanelLeft] 的**触屏等价物**。
+    // 唯一的差别是判定依据：按键版要看"焦点落在哪一列"（因为右键的语义是移焦点），
+    // 触屏版直接看**三态状态** —— 手指滑动是明确的意图，不需要再猜焦点。
+    // 触屏下顺带把焦点也搬到该在的列上，这样"滑完接着用遥控器"不会别扭。
+
+    /**
+     * 触屏向左划：深入一层。
+     *
+     * 状态 0 → 展开节目单列（无节目则不展开，与 [onPanelRight] 的判据一致）；
+     * 状态 1 → 焦点送进节目单列（→ 状态 2）；已在状态 2 则不动。
+     */
+    private fun enterPanelDeeper() {
+        if (!epgVisible) {
+            // 判据「菜单没必要左移」：第三列没节目时展开只是把分组栏白白推出屏幕
+            if (!epgColumn.hasProgrammes()) {
+                UiLog.i("界面", "第三列无节目 → 不展开（分组栏保持不动）")
+                return
+            }
+            // 手指滑动没有"焦点"这一步，但把焦点顺手挪到频道列，滑完用遥控器接着操作更顺
+            if (focusInside(navColumn)) FocusEngine.focusFirstIn(channelColumn)
+            epgVisible = true
+            refreshPanelState()
+            return
+        }
+        if (!epgFocused) {
+            // 与 onPanelRight 同：必须**先**把焦点送进第三列再切状态，
+            // 否则 setPanelState 的 blockOffscreenFocus() 会把焦点夺走（状态到了 2 但列表没焦点）。
+            epgColumn.focusProgrammeList()
+            epgFocused = true
+            refreshPanelState()
+            // 第一帧 recycler 还没子 View，取焦会失败，动画结束后补一次
+            handler.removeCallbacks(epgFocusRetry)
+            handler.postDelayed(epgFocusRetry, 260L)
+        }
+    }
+
+    /**
+     * 触屏向右划：退回一层。
+     *
+     * 状态 2 → 1（焦点退回频道列）→ 0 → 再右滑**收起整个面板**。
+     * 「收起」这一步是触屏特有的便利：手指滑到最外层还想退时，
+     * 用户的预期就是"把菜单关掉回到全屏画面"，而不是被卡在面板里。
+     */
+    private fun leavePanelOneLevel() {
+        when {
+            epgFocused -> {
+                epgFocused = false
+                refreshPanelState()
+                FocusEngine.restoreFocus(channelColumn, currentChannel?.name)
+            }
+            epgVisible -> {
+                epgVisible = false
+                refreshPanelState()
+            }
+            else -> hidePanel()
         }
     }
 

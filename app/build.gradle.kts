@@ -24,11 +24,15 @@ android {
         // v1.11：选台面板取消定时自动隐藏（只在选台 / 返回 / 点空白时收起）；
         //        设置页改完某项后焦点停在原处不再跳回列表开头；
         //        检查更新不再残留底部粘性提示，更新下载改为并发探测镜像线路（国内网络可下）。
+        // v1.12：内置「潮剧」订阅源；同一节目内多线路顺序连播；
+        //        更新下载目录改为多候选 + 真实写入探针（修小米电视更新失败）；
+        //        清掉两处开发话术提示（回放 / 节目单）；
+        //        触屏在面板内左右滑可切层级；整体 UI 对齐到 24dp 网格并收窄第三列。
         // ⚠️ 与 App.kt 的 BuildConfigCompat 必须一致：
         //     versionCode ↔ VERSION_CODE（升级通道用它比大小）
         //     versionName ↔ VERSION_NAME
-        versionCode = 16
-        versionName = "1.11-legacy.16"
+        versionCode = 17
+        versionName = "1.12-legacy.17"
         vectorDrawables { useSupportLibrary = true }
         // minSdk < 21 时 core library desugaring 强制要求 multidex
         multiDexEnabled = true
