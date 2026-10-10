@@ -2,8 +2,6 @@ package top.yogiczy.mytv.legacy
 
 import android.content.Context
 import androidx.multidex.MultiDexApplication
-import java.io.PrintWriter
-import java.io.StringWriter
 
 /**
  * minSdk 17 走 legacy multidex，必须由 Application 触发 install。
@@ -19,10 +17,23 @@ class App : MultiDexApplication() {
     companion object {
         const val PREFS = "legacy_crash"
         const val KEY_LAST_CRASH = "last_crash"
+
+        /**
+         * v1.17：已被用户「看过/忽略过」的那条崩溃记录的指纹。
+         *
+         * 用途：同一条崩溃**只在启动时弹一次全屏**，之后再启动就只在底部提一行、
+         * 不再挡着用户用遥控器（见 [top.yogiczy.mytv.legacy.data.CrashStore.isAcked]）。
+         * 用户报障原话：「退出 app 重新进 app 还是卡在这个崩溃页面…不至于只能卸载 app 重装」。
+         */
+        const val KEY_CRASH_ACK = "crash_ack_fingerprint"
     }
 
     override fun onCreate() {
         super.onCreate()
+        // v1.17：**第一件事**注入 Context —— `Http` 需要读 `assets/ca/*.pem`（随包的现代根证书）。
+        // 必须在 enableTls12() 之前：那一句会触发 `tlsContext` 的 lazy 求值，
+        // 而信任链只在那一刻组装一次（晚一步注入，随包根证书就永远不生效了）。
+        top.yogiczy.mytv.legacy.net.Http.init(this)
         enableTls12()
         installCrashLogger()
         // M5：配置迁移（M2 已实现 Prefs.migrateIfNeeded，但一直没有调用点）。
@@ -54,17 +65,9 @@ class App : MultiDexApplication() {
     private fun installCrashLogger() {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
-            runCatching {
-                val sw = StringWriter()
-                error.printStackTrace(PrintWriter(sw))
-                val head = "机型: ${android.os.Build.MODEL}\n" +
-                        "Android: ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})\n" +
-                        "版本: ${BuildConfigCompat.VERSION_NAME}\n\n"
-                getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                    .putString(KEY_LAST_CRASH, head + sw.toString())
-                    // 必须 commit：进程马上要死了，apply 可能写不完
-                    .commit()
-            }
+            // v1.17：落盘逻辑统一收进 CrashStore（`MainActivity.buildUiSafely` 也要用同一份
+            // 头部格式，写两遍必然漂移）。头部 = 机型 / Android 版本 / 应用版本。
+            runCatching { top.yogiczy.mytv.legacy.data.CrashStore.save(this, error) }
             previous?.uncaughtException(thread, error)
         }
     }
@@ -81,7 +84,7 @@ class App : MultiDexApplication() {
  *    （M0 之前它就停在 "0.3.1-legacy"，比实际版本落后三个版本）。
  */
 object BuildConfigCompat {
-    const val VERSION_NAME = "1.16-legacy.21"
+    const val VERSION_NAME = "1.17-legacy.22"
 
     /**
      * 版本序号（单调递增）。
@@ -99,6 +102,7 @@ object BuildConfigCompat {
      * ⚠️ v1.14：19。
      * ⚠️ v1.15：20。
      * ⚠️ v1.16：21。
+     * ⚠️ v1.17：22。
      */
-    const val VERSION_CODE = 21
+    const val VERSION_CODE = 22
 }

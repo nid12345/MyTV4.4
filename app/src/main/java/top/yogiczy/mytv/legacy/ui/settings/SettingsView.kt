@@ -70,6 +70,12 @@ class SettingsView(context: Context) : LinearLayout(context) {
     var onResetAll: (() -> Unit)? = null
     var onSettingChanged: (() -> Unit)? = null
 
+    /** v1.17：「关于 → 崩溃记录」——查看上次崩溃堆栈并（一键）反馈到 GitHub。 */
+    var onCrashRecord: (() -> Unit)? = null
+
+    /** v1.17：「关于 → 崩溃反馈设置」——录入 GitHub Token（复用手机扫码填写）。 */
+    var onFeedbackSetting: (() -> Unit)? = null
+
     init {
         orientation = HORIZONTAL
         setPadding(UiKit.dp(context, 58f), UiKit.dp(context, 24f),
@@ -399,7 +405,11 @@ class SettingsView(context: Context) : LinearLayout(context) {
             contentColumn.removeAllViews()
         val ctx = context
         val rows = when (SettingsCategory.ALL[selected]) {
-            SettingsCategory.ABOUT -> SettingsCats.about(ctx)
+            SettingsCategory.ABOUT -> SettingsCats.about(
+                ctx,
+                { onCrashRecord?.invoke() },
+                { onFeedbackSetting?.invoke() },
+            )
             SettingsCategory.APP -> SettingsCats.app(ctx,
                 { onResetAll?.invoke() }, { onCheckUpdate?.invoke() })
             SettingsCategory.IPTV -> SettingsCats.iptv(ctx,

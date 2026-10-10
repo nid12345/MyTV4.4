@@ -1,5 +1,6 @@
 package top.yogiczy.mytv.legacy.net
 
+import android.content.Context
 import android.util.Log
 import okhttp3.Interceptor
 import okhttp3.MediaType
@@ -107,8 +108,150 @@ object Http {
         // ⚠️ 必须**先**把 Conscrypt 装好再 getInstance，否则这里会拿到系统那套
         // 没有 AEAD 的老实现（v1.6 踩到：顺序反了等于没装）。
         ensureTlsReady()
-        runCatching { SSLContext.getInstance("TLSv1.2").apply { init(null, null, null) } }
+        // ⚠️ 这里传的是 [trustManager]（系统信任链 ∪ 随包根证书），**不是** null。
+        // 传 null 只会用系统那份老 CA 库，见下面 [EXTRA_CA_FILES] 的长注释。
+        val tms = trustManager?.let { arrayOf<javax.net.ssl.TrustManager>(it) }
+        runCatching { SSLContext.getInstance("TLSv1.2").apply { init(null, tms, null) } }
             .getOrNull()
+    }
+
+    // =========================================================================
+    // v1.17：随包附带的现代根证书
+    // =========================================================================
+    //
+    // 【为什么要补】老设备（Android 4.4 / 6.0）自带的 CA 库是随系统发布的，**不会再更新**。
+    // 而证书颁发机构这几十年换了根：v1.17 在 API 19 模拟器上实测 `api.github.com` 的现场链条是
+    //
+    //   [0] CN=*.github.com
+    //   [1] CN=Sectigo Public Server Authentication CA DV E36
+    //   [2] CN=Sectigo Public Server Authentication Root E46  ← issuer = USERTrust ECC CA
+    //
+    // 系统库里没有 `USERTrust ECC Certification Authority`，于是 PKIX 找不到锚点：
+    //
+    //   javax.net.ssl.SSLHandshakeException:
+    //     java.security.cert.CertPathValidatorException: Trust anchor for certification path not found.
+    //
+    // 同一台设备上**内置的「检查更新」也一直在报同一个错**（raw.githubusercontent.com /
+    // gh-proxy.com / ghproxy.net 全部 Trust anchor 失败），只是静默降级没人看见。
+    //
+    // 【为什么是"追加"而不是"全部信任"】只往信任库里**增加**公开 CA 的根证书，
+    // 系统原本的校验一条都不放松：先按系统信任链验，验不过才用随包根证书再验一次。
+    // 所以这不是 `TrustAllCerts` 那种关掉校验，而是"把现代设备的根证书库搬到老设备上"。
+    //
+    // 【这些根证书是哪来的】`app/src/main/assets/ca/`，取自 macOS 系统根证书库
+    // （`/System/Library/Keychains/SystemRootCertificates.keychain`），逐个核过
+    // CA:TRUE 与公开的 SHA-256 指纹（见该目录下 4 个 .pem 的文件名与 README 记录）。
+    // =========================================================================
+
+    /** 随包根证书清单（`assets/` 下）。 */
+    private val EXTRA_CA_FILES = arrayOf(
+        "ca/usertrust_ecc.pem",     // Sectigo/USERTrust ECC 根（GitHub 现在这条链需要它）
+        "ca/usertrust_rsa.pem",     // Sectigo/USERTrust RSA 根（另一条常见链）
+        "ca/isrg_x1.pem",           // Let's Encrypt ISRG Root X1
+        "ca/digicert_g2.pem",       // DigiCert Global Root G2（大量 CDN 在用）
+    )
+
+    /** 应用上下文，只用来读上面那份 assets。由 `App.onCreate` 调 [init] 注入。 */
+    @Volatile
+    private var appContext: Context? = null
+
+    /**
+     * 注入上下文（必须在任何网络调用**之前**调用，`App.onCreate` 的第一件事）。
+     *
+     * 为什么不让 [Http] 自己去拿：本工程没有全局单例持有 Context 的惯例，
+     * 与其偷偷从 `ActivityThread` 反射取，不如显式注入一次、来源清楚。
+     */
+    fun init(ctx: Context) {
+        appContext = ctx.applicationContext
+        ensureTlsReady()
+    }
+
+    /** 随包根证书构成的 TrustManager（assets 读不到时返回 null，行为退回改动前）。 */
+    private val extraTrustManager: X509TrustManager? by lazy {
+        val ctx = appContext
+        if (ctx == null) {
+            Log.i(TLS_TAG, "额外根证书：未注入 Context，跳过（Http.init 未被调用）")
+            null
+        } else {
+            runCatching {
+                val ks = KeyStore.getInstance(KeyStore.getDefaultType()).apply { load(null, null) }
+                val cf = java.security.cert.CertificateFactory.getInstance("X.509")
+                var loaded = 0
+                EXTRA_CA_FILES.forEach { path ->
+                    runCatching {
+                        ctx.assets.open(path).use { input ->
+                            ks.setCertificateEntry(path.substringAfterLast('/'), cf.generateCertificate(input))
+                        }
+                        loaded++
+                    }.onFailure { Log.w(TLS_TAG, "额外根证书读取失败：$path（${it.javaClass.simpleName}）") }
+                }
+                if (loaded == 0) {
+                    Log.i(TLS_TAG, "额外根证书：一个都没读到，继续用系统信任链")
+                    null
+                } else {
+                    val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+                    tmf.init(ks)
+                    val tm = tmf.trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
+                    Log.i(TLS_TAG, "额外根证书：已装载 $loaded 个（assets/ca）")
+                    tm
+                }
+            }.getOrNull()
+        }
+    }
+
+    /** 真正生效的信任链：系统 ∪ 随包（有哪个用哪个，两个都没有就返回 null = 系统默认）。 */
+    private val trustManager: X509TrustManager? by lazy {
+        val sys = defaultTrustManager
+        val extra = extraTrustManager
+        when {
+            sys != null && extra != null -> CompositeTrustManager(sys, extra) {
+                if (!loggedExtraCaHit) {
+                    loggedExtraCaHit = true
+                    Log.i(TLS_TAG, "证书链由随包根证书验证通过（系统库缺根）")
+                }
+            }
+            else -> sys ?: extra
+        }
+    }
+
+    /** 是否已经因为"系统库里没有"而走了随包根证书（只打一次日志，避免刷屏）。 */
+    @Volatile
+    private var loggedExtraCaHit = false
+
+    /**
+     * 组合信任链：**先按系统信任链验，验不过再按随包根证书验一次**。
+     *
+     * 顺序不能反：正常情况下必须走系统那套（保持行为与改动前一致），
+     * 只有在老设备撞上"根证书不在库里"时才落到第二道。
+     */
+    private class CompositeTrustManager(
+        private val primary: X509TrustManager,
+        private val secondary: X509TrustManager,
+        /** 落到第二道信任链时回调一次（宿主用来打一行现场日志）。 */
+        private val onFallback: () -> Unit,
+    ) : X509TrustManager {
+
+        override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {
+            try {
+                primary.checkClientTrusted(chain, authType)
+            } catch (e: java.security.cert.CertificateException) {
+                secondary.checkClientTrusted(chain, authType)
+            }
+        }
+
+        override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {
+            try {
+                primary.checkServerTrusted(chain, authType)
+            } catch (e: java.security.cert.CertificateException) {
+                // 落到这里 = 系统信任链不认（老设备缺根证书）。用随包根证书再验一次；
+                // 还是不认就把**第二道的异常**抛出去（它更接近真实原因，且不会误导成"证书无效"）。
+                secondary.checkServerTrusted(chain, authType)
+                onFallback()
+            }
+        }
+
+        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> =
+            primary.acceptedIssuers + secondary.acceptedIssuers
     }
 
     /**
@@ -195,7 +338,9 @@ object Http {
      */
     fun applyTls(builder: OkHttpClient.Builder): OkHttpClient.Builder {
         val factory = tls12SocketFactory()
-        val tm = defaultTrustManager
+        // v1.17：这里用 [trustManager]（系统 ∪ 随包根证书）而不是 [defaultTrustManager] ——
+        // 理由见 [EXTRA_CA_FILES] 那段（老的 Android 信任库里没有 GitHub 现在这条链的锚点）。
+        val tm = trustManager
         if (factory != null && tm != null) {
             builder.sslSocketFactory(factory, tm)
         }

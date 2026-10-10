@@ -15,6 +15,7 @@ Android 4.4.2 上流畅跑**。
 - [安装](#安装)
 - [构建](#构建)
 - [应用内升级通道](#应用内升级通道)
+- [崩溃记录与一键反馈](#崩溃记录与一键反馈)
 - [权限说明](#权限说明)
 - [免责声明](#免责声明)
 - [引用与致谢](#引用与致谢)
@@ -48,6 +49,9 @@ Android 4.4.2 上流畅跑**。
 - **设置页改完某项后停在原处**：设置列表里改完任意一项，光标仍留在那一项上，
   不会跳回列表开头（触摸点开关、遥控器按确认键两条路径都覆盖）
 - **记忆上次频道**：退出重开直接回到上次观看的频道
+- **崩溃记录 + 一键反馈**：崩了以后重启**照常可用**（不再卡在一个按不动的页面）；崩溃堆栈会存下来，
+  弹窗里点「反馈到 GitHub」就把这条堆栈直接提交到项目的 Issues（同一条崩溃只开一个 issue，
+  重复反馈追加记录）；也可以「复制记录」或从「设置 → 关于 → 崩溃记录」随时查看
 - **DLNA 投屏**：SSDP 发现局域网 MediaRenderer，AVTransport 推送当前频道；
   **点一次设备即开始投送**，投送成功后才收起面板并提示结果，失败会留在面板上给出原因
 - **播放控制弹层**：可拖动的进度条 + 播放/暂停 + 快退/快进 30 秒 + 多线路入口
@@ -96,7 +100,7 @@ Android 4.4.2 上流畅跑**。
 侧载安装（无应用商店）：
 
 ```bash
-adb install -r MyTV4.4-v1.16-legacy21.apk
+adb install -r MyTV4.4-v1.17-legacy22.apk
 ```
 
 或把 APK 拷进 U 盘 / 存储卡，用盒子自带的文件管理器安装（需允许「未知来源」）。
@@ -125,6 +129,51 @@ cp keystore.properties.example keystore.properties
 
 ---
 
+## 崩溃记录与一键反馈
+
+### 崩了之后会怎样
+
+1. 崩溃瞬间把堆栈（机型 / Android 版本 / 应用版本 + 调用栈）写到本机；
+2. 下次启动**界面照常构建、照常播放**，崩溃记录以弹窗形式盖在上面 ——
+   遥控器左右选「反馈到 GitHub / 复制记录 / 关闭」，**返回键也能直接关掉**；
+3. 关掉之后这条记录就不再来挡你（下次启动只在底部提一行），
+   想再看 / 再反馈就进「设置 → 关于 → 崩溃记录」；
+4. 弹窗闲置 2 分钟会自动关，避免遥控器出问题时把人锁死在上面。
+
+> v1.17 以前不是这样：那时崩了之后重启会**整个跳过界面构建**，屏幕上只剩一个
+> 焦点够不到的按钮、返回键直接结束应用，退出重进还是同一屏 —— 只能卸载重装。
+> 这个坑在小米电视（MI TV4-ANSM0 / Android 6.0.1）上报过一次，已修。
+
+### 怎么开「一键反馈到 GitHub」
+
+反馈走 GitHub REST API，**Token 由你自己在电视上填一次**（不会编进安装包里 ——
+本仓库是公开的，写死在 APK 里的写权限等于交给全网）：
+
+1. 手机或电脑打开 <https://github.com/settings/personal-access-tokens/new>
+2. 选 **Fine-grained token** → Repository access 只勾 `nid12345/MyTV4.4`
+3. 权限里把 **Issues** 设为 **Read and write** → 生成并复制
+4. 电视上：「设置 → 关于 → **崩溃反馈设置**」→ 粘贴。
+   电视上打字麻烦，那里有 **「手机扫码填写」**：扫屏幕上的二维码，在手机网页里贴好点「推送到电视」。
+
+配置好之后，崩溃弹窗里点一下「反馈到 GitHub」就会：
+
+- 按标题 `[崩溃] <异常类型> · <版本>` 找同名的未关闭 issue；
+- 找不到 → 新建 issue（正文带机型 / 版本 + 完整堆栈）；
+- 找到了 → 在它下面**追加一条评论**（这样一条崩溃就是一条 issue，能直接看出复现了几次）。
+
+Token 只存在本机 SharedPreferences，只发往 `api.github.com`；「崩溃反馈设置」里清空即失效。
+
+### 老设备的 TLS 根证书
+
+Android 4.4 / 6.0 自带的 CA 库**不会再更新**，而 `api.github.com` 现在的证书链
+（`Sectigo Public Server Authentication Root E46` ← `USERTrust ECC CA`）不在那份老库里，
+会直接报 `Trust anchor for certification path not found`。v1.17 起随包附带 4 张公开根证书
+（`app/src/main/assets/ca/`：USERTrust ECC / USERTrust RSA / ISRG Root X1 / DigiCert Global Root G2），
+**先按系统信任链校验，不通过才用随包根证书再校验一次** —— 只"追加"可信根，不放松任何原有校验。
+
+副作用是**好的**：老设备上「检查更新」原本也因为同一个原因一直在静默失败
+（`raw.githubusercontent.com` / `ghproxy` 全是 Trust anchor 错误），这次一并修好了。
+
 ## 应用内升级通道
 
 分发走 GitHub，不需要任何自建服务器：
@@ -133,11 +182,11 @@ cp keystore.properties.example keystore.properties
 
    ```json
    {
-     "versionCode": 21,
-     "versionName": "1.16-legacy.21",
-     "url": "https://github.com/nid12345/MyTV4.4/releases/download/v1.16/MyTV4.4-v1.16-legacy21.apk",
-     "size": 10373110,
-     "md5": "f2623248e83c911749402aa406afba9f",
+     "versionCode": 22,
+     "versionName": "1.17-legacy.22",
+     "url": "https://github.com/nid12345/MyTV4.4/releases/download/v1.17/MyTV4.4-v1.17-legacy22.apk",
+     "size": 10391413,
+     "md5": "a20e744ca10f7527970787f569c7007f",
      "notes": "更新说明，可多行"
    }
    ```

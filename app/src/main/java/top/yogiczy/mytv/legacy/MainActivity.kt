@@ -29,6 +29,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import top.yogiczy.mytv.legacy.ui.AppDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.recyclerview.widget.RecyclerView
 import androidx.appcompat.content.res.AppCompatResources
 import okhttp3.Request
 import top.yogiczy.mytv.legacy.core.FocusEngine
@@ -50,6 +51,8 @@ import top.yogiczy.mytv.legacy.data.EpgProgramme.Companion.progress
 import top.yogiczy.mytv.legacy.data.EpgProgramme.Companion.remainingMinutes
 import top.yogiczy.mytv.legacy.data.EpgList.Companion.match
 import top.yogiczy.mytv.legacy.data.ChannelParser
+import top.yogiczy.mytv.legacy.data.CrashReporter
+import top.yogiczy.mytv.legacy.data.CrashStore
 import top.yogiczy.mytv.legacy.data.IptvSource
 import top.yogiczy.mytv.legacy.data.Prefs
 import top.yogiczy.mytv.legacy.data.UiTimeShowMode
@@ -133,6 +136,25 @@ class MainActivity : AppCompatActivity() {
 
         /** v1.7：画面开始播放（拿到视频分辨率）后信息框再保留的时长。 */
         private const val READY_HIDE_AFTER_MS = 2_000L
+
+        /**
+         * v1.17：往上爬 parent 找"RecyclerView 直接子视图"时的最大层数。
+         *
+         * 正常视图树深度是 3~5 层；给 64 是为了**防失控**：
+         * 万一有人把 `parent` 链做成了环（或视图树畸形），这个循环会死转，
+         * 而它跑在 `dispatchKeyEvent` 里 —— 卡一下就是整个界面按键无响应。
+         */
+        private const val MAX_CLIMB = 64
+
+        /**
+         * v1.17：崩溃记录窗口的兜底自动关闭时长（毫秒）。
+         *
+         * 用户报障原话：「一遇到崩溃就什么都做不了…退出 app 重新进还是卡在这个崩溃页面，
+         * 只能卸载重装那就太没体验感了」。所以这个窗口**绝不允许**把人锁死：
+         * 除了返回键 / 「关闭」按钮，再加一道定时兜底 —— 只要用户在这段时间里按过键，
+         * 计时就会续期（见 [keepOverlaysAlive]），真放下遥控器了才自动关。
+         */
+        private const val CRASH_DIALOG_IDLE_CLOSE_MS = 120_000L
 
         /** v1.7：滑动手势的最短主轴位移（像素），太短的滑动不当作换台/切线路。 */
         private const val SWIPE_MIN_PX = 90f
@@ -331,6 +353,9 @@ class MainActivity : AppCompatActivity() {
         if (dlnaView != null) dlnaCastAutoClose.active()
         if (epgSourceView != null) epgSourceAutoClose.active()
         if (groupManageView != null) groupManageAutoClose.active()
+        // v1.17：崩溃记录窗口的兜底自动关闭也**续期** —— 用户还在按遥控器（在看堆栈 /
+        // 在选按钮）就说明人还在，别把它收掉；真放下遥控器了才会被收掉。
+        if (crashDialogOpen) scheduleCrashAutoClose()
     }
 
     // ==================== v1.14 需求 1：加载直播源的提示窗 ====================
@@ -874,8 +899,19 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         enterFullscreen()
         Snackbar.with(this)                      // M5：提示条需要宿主才能挂载
-        if (showCrashReportIfAny()) return
-        buildUi()
+        // ---------------------------------------------------------------------------
+        // v1.17（小米电视真机报障）修复：这里原来是 `if (showCrashReportIfAny()) return`
+        // ——有崩溃记录就**整体跳过 buildUi()**，屏幕上只剩一个自绘的"清除记录"按钮。
+        // 三个后果，用户原话：「一遇到崩溃就什么都做不了…退出 app 重新进还是卡在这个崩溃页面，
+        // 不至于只能卸载 app 重装才能用那就太没体验感了」：
+        //   ① 没有任何退出/返回入口（返回键走的是 `!::panel.isInitialized → super.onBackPressed()`，
+        //      直接结束 Activity，等于"退出应用"而不是关掉崩溃页）；
+        //   ② 那个按钮没有显式 requestFocus，电视上方向键落不到它上面，根本按不动；
+        //   ③ 记录不清就每次启动都拦一屏。
+        // 现在：**界面照常构建、照常可播可用**，崩溃记录改成一个可关闭的弹窗（见 showCrashDialog），
+        // 且"看过一次"之后再启动只提一行、不再挡路。
+        // ---------------------------------------------------------------------------
+        buildUiSafely()
 
         // M5：远程台标（后台线程）加载完成后按频道名就地回填，不重建列表
         ChannelLogoStore.onLogoLoaded = { name -> handler.post { applyLogosLoaded(name) } }
@@ -914,6 +950,278 @@ class MainActivity : AppCompatActivity() {
         refreshTopRight()
         // v1.8 接通「升级提醒」：启动后自动静默检查一次更新（设置页里那一项原来只写 Prefs、无人读）。
         if (Prefs.updateRemindEnable(this)) checkStartupUpdate()
+
+        // v1.17：崩溃记录放在最后 —— 让底层的加载/播放先跑起来，弹窗关掉之后立刻就是可用状态。
+        // ⚠️ 必须 post 到下一帧：本帧视图还没 layout，弹窗里的按钮拿不到焦点（老设备上
+        // `requestFocus()` 会直接失败 → 又变回"按键够不到按钮"）。
+        handler.post { maybeShowCrashReport() }
+    }
+
+    /**
+     * 构建界面，**失败也不让应用变成"没法用"**（v1.17）。
+     *
+     * 用户报障里最难受的一句是"只能卸载 app 重装才能用"。`buildUi()` 里是整棵树
+     * （`setContentView` + 几十个自绘控件），任意一处抛异常，旧实现就是：
+     * `onCreate` 抛 → 进程死 → 下次启动同一个异常 → **永远进不去**。
+     *
+     * 所以这里兜一层：真崩了就
+     *   ① 把异常写入崩溃记录（下次启动能看、能一键反馈）；
+     *   ② 起一个最小宿主（一个纯 FrameLayout）把崩溃弹窗挂上去 ——
+     *      弹窗只依赖 `AppDialog` 和 FrameLayout，不需要 `panel` / `snackbar` / 播放器，
+     *      于是"至少能把记录发出来 / 关掉重开"，绝不会是死页面。
+     *
+     * 注意：`buildUi()` 半途失败时 `panel` 等 lateinit 可能是"初始化了一部分"的状态，
+     * 因此所有读它们的代码都走 `::xxx.isInitialized` 守卫（本工程一直是这么做的）。
+     */
+    private fun buildUiSafely() {
+        try {
+            buildUi()
+        } catch (t: Throwable) {
+            Log.e("界面", "buildUi 失败，降级为最小宿主 + 崩溃弹窗", t)
+            runCatching { CrashStore.save(this, t) }
+            showBareCrashHost()
+        }
+    }
+
+    /**
+     * 界面整体构建失败时的最小宿主。
+     *
+     * 只做两件事：换上一个空 FrameLayout（赋给 [rootView]，让 `showAppDialog` 有地方挂），
+     * 下一帧弹出崩溃记录。刻意**不碰** panel / snackbar / player —— 它们此刻可能是半初始化状态。
+     */
+    private fun showBareCrashHost() {
+        val host = FrameLayout(this).apply { setBackgroundColor(0xFF101014.toInt()) }
+        rootView = host
+        setContentView(host)
+        host.post {
+            val rec = CrashStore.read(this)
+            if (rec != null) showCrashDialog(rec)
+        }
+    }
+
+    // ==================== v1.17：崩溃记录（展示 / 反馈） ====================
+
+    /** 崩溃弹窗是否在屏（决定兜底定时器要不要续期 / 要不要关）。 */
+    private var crashDialogOpen = false
+
+    /** 崩溃弹窗的"闲置自动关闭"兜底（见 [CRASH_DIALOG_IDLE_CLOSE_MS]）。 */
+    private val crashDialogAutoClose = Runnable {
+        if (crashDialogOpen && dialogView != null) {
+            UiLog.i("崩溃", "崩溃记录窗口闲置超时 → 自动关闭（保证应用始终可用）")
+            // 自动关掉也要记"已看过"：否则用户放着不看、每次启动都被挡一屏
+            runCatching { CrashStore.read(this)?.let { CrashStore.markAcked(this, it) } }
+            crashDialogOpen = false
+            closeAppDialog()
+        }
+    }
+
+    /**
+     * 启动时处理上次的崩溃记录（v1.17）。
+     *
+     * 分两种情况，都是**非阻塞**的：
+     *   · 第一次见到这条记录 → 弹窗全屏展示，带「反馈到 GitHub / 复制记录 / 关闭」；
+     *   · 用户已经看过并关掉过同一条 → 只在底部提一行，不挡任何操作
+     *     （这就是用户要的"退出重进还能正常用"）。
+     */
+    private fun maybeShowCrashReport() {
+        if (!::rootView.isInitialized) return
+        val rec = CrashStore.read(this) ?: return
+        if (CrashStore.isAcked(this, rec)) {
+            // 提示行走底部状态条：与"播放失败"等提示同一套机制，不拦按键、不挡面板。
+            showBottomStatus("上次崩溃过（${rec.exceptionName}）· 设置→关于→崩溃记录 可查看并反馈")
+            UiLog.i("崩溃", "崩溃记录已忽略过，仅提示：${rec.fingerprint}")
+            return
+        }
+        showCrashDialog(rec)
+    }
+
+    /**
+     * 崩溃记录窗口。
+     *
+     * 用户原话：「一遇到崩溃就什么都做不了，一个按钮能退出返回都没有，或是有按键但是根本
+     * 就按不到下面按钮」+「添加一个把这个崩溃记录能一键反馈上传到 GitHub 的功能」。
+     * 于是这里的三条硬要求：
+     *   ① **按钮必须能被遥控器够到** —— `AppDialog.buildMessage` 返回的 `firstFocus`
+     *      由 `showAppDialog` 显式 `requestFocus()`（默认焦点不在任何控件上时，
+     *      电视上按方向键是没有"起点"的，压根不会自己跳到第一个按钮）；
+     *   ② **必须能退出** —— 返回键（`onBackPressed` 里对话框优先）+「关闭」按钮 +
+     *      闲置自动关闭三重保险；
+     *   ③ 三个动作都是"点了就有反应"的，不依赖网络（反馈失败也会把原因显示出来）。
+     */
+    private fun showCrashDialog(rec: CrashStore.Record) {
+        crashDialogOpen = true
+        val msg = buildString {
+            append("机型 / 版本都在下面这段里，直接反馈即可定位。\n\n")
+            append(rec.text.trim())
+        }
+        val built = AppDialog.buildMessage(
+            this,
+            "上次启动崩溃了",
+            msg,
+            listOf(
+                "反馈到 GitHub" to { reportCrashToGithub(rec) },
+                "复制记录" to { copyCrashReport(rec) },
+                "关闭" to { dismissCrashDialog(rec) },
+            ),
+        )
+        showAppDialog(built)
+        scheduleCrashAutoClose()
+        UiLog.i("崩溃", "崩溃记录窗口已打开（指纹 ${rec.fingerprint}）")
+    }
+
+    /** 重排闲置自动关闭（打开时、以及每次按键/触摸时都调一次续期）。 */
+    private fun scheduleCrashAutoClose() {
+        handler.removeCallbacks(crashDialogAutoClose)
+        if (crashDialogOpen) handler.postDelayed(crashDialogAutoClose, CRASH_DIALOG_IDLE_CLOSE_MS)
+    }
+
+    /** 关掉崩溃窗口：记下"这条已经给用户看过了"，下次启动不再挡屏。 */
+    private fun dismissCrashDialog(rec: CrashStore.Record) {
+        crashDialogOpen = false
+        handler.removeCallbacks(crashDialogAutoClose)
+        CrashStore.markAcked(this, rec)
+        closeAppDialog()
+        showBottomStatus("崩溃记录已保存 · 设置→关于→崩溃记录 可随时查看并反馈")
+    }
+
+    /** 「复制记录」：老设备上这是最稳的兜底（复制了发微信/粘贴到哪都行）。 */
+    private fun copyCrashReport(rec: CrashStore.Record) {
+        val ok = runCatching {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("崩溃记录", rec.text))
+            true
+        }.getOrDefault(false)
+        UiLog.i("崩溃", "复制崩溃记录 → ${if (ok) "成功" else "失败"}")
+        showBottomStatus(if (ok) "崩溃记录已复制到剪贴板" else "复制失败（这台设备不支持剪贴板）")
+    }
+
+    /**
+     * 「反馈到 GitHub」。
+     *
+     * 没配 Token 时**先教怎么配**（而不是报一句"失败"）：Token 支持复用「手机扫码填写」，
+     * 手机上登录 GitHub 生成细粒度 PAT 再扫过来，不用遥控器敲那串字符。
+     */
+    private fun reportCrashToGithub(rec: CrashStore.Record) {
+        val token = Prefs.githubToken(this)
+        if (token.isBlank()) {
+            showCrashTokenIntro()
+            return
+        }
+        // 上传期间给一个"正在…"的反馈并关掉崩溃窗口，避免用户以为按了没反应
+        crashDialogOpen = false
+        handler.removeCallbacks(crashDialogAutoClose)
+        closeAppDialog()
+        showBottomStatus("正在把崩溃记录提交到 GitHub…", sticky = true)
+        UiLog.i("崩溃", "开始反馈：${CrashReporter.issueTitle(rec.text)}")
+
+        Thread {
+            val result = try {
+                CrashReporter.upload(token, rec.text)
+            } catch (t: Throwable) {
+                CrashReporter.Result(false, "网络异常（${t.javaClass.simpleName}：${t.message ?: "无描述"}）")
+            }
+            handler.post {
+                if (result.ok) {
+                    UiLog.i("崩溃", "反馈成功：${result.message.replace('\n', ' ')}")
+                    CrashStore.clear(this)          // 已经上了 GitHub，本地不再拦人
+                    clearBottomStatus()
+                    showCrashResultDialog("已反馈", result.message, null)
+                } else {
+                    UiLog.w("崩溃", "反馈失败：${result.message.replace('\n', ' ')}")
+                    clearBottomStatus()
+                    showCrashResultDialog("反馈失败", result.message, rec)
+                }
+            }
+        }.start()
+    }
+
+    /** 反馈结果弹窗。失败时给一条「重试」——**记录还留着**，重试不需要重新找堆栈。 */
+    private fun showCrashResultDialog(title: String, message: String, retry: CrashStore.Record?) {
+        val buttons = ArrayList<Pair<String, () -> Unit>>(2)
+        if (retry != null) {
+            buttons += "重试" to {
+                closeAppDialog()
+                // 重试先回到"崩溃窗口"再点反馈：Token 可能正是刚刚填好的
+                reportCrashToGithub(retry)
+            }
+        }
+        buttons += "关闭" to { crashDialogOpen = false; closeAppDialog() }
+        crashDialogOpen = false
+        showAppDialog(AppDialog.buildMessage(this, title, message, buttons))
+    }
+
+    /** 没配 Token 时的引导（含申请地址与所需权限）。 */
+    private fun showCrashTokenIntro() {
+        val msg = buildString {
+            append("一键反馈需要先填一次 GitHub Token（只需一次，之后一直有效）。\n\n")
+            append("1) 手机或电脑打开：\n").append(CrashReporter.TOKEN_HELP_URL).append('\n')
+            append("2) 选 Fine-grained token，Repository access 只勾 nid12345/MyTV4.4\n")
+            append("3) 权限里把 Issues 设为 Read and write，生成后复制\n")
+            append("4) 回到电视：设置 → 关于 → 崩溃反馈设置，粘贴进去\n")
+            append("   （电视上打字麻烦，那里可以用「手机扫码填写」把 Token 从手机贴过来）\n\n")
+            append("Token 只存在本机、只发往 api.github.com，不会随安装包分发。")
+        }
+        crashDialogOpen = false
+        showAppDialog(
+            AppDialog.buildMessage(
+                this, "先配置 GitHub Token", msg,
+                listOf(
+                    "去填写" to { closeAppDialog(); showCrashTokenInput() },
+                    "关闭" to { closeAppDialog() },
+                ),
+            )
+        )
+    }
+
+    /** Token 录入框（复用 v1.14 的「手机扫码填写」——Token 又长又难敲）。 */
+    private fun showCrashTokenInput() {
+        showAppDialog(
+            AppDialog.buildSingleInput(
+                this,
+                "GitHub Token（崩溃反馈用）",
+                "粘贴 fine-grained PAT（Issues: Read and write）",
+                initial = Prefs.githubToken(this),
+                qrPush = AppDialog.QrPush(
+                    specs = listOf(
+                        AppDialog.QrPush.FieldSpec(
+                            "value", "GitHub Token", "粘贴 fine-grained PAT", 0
+                        )
+                    ),
+                    onReceive = { UiLog.i("崩溃", "扫码推送 → Token（${it["value"]?.length ?: 0} 字符）") },
+                ),
+                onCancel = { closeAppDialog() },
+                onOk = { value ->
+                    Prefs.setGithubToken(this, value)
+                    closeAppDialog()
+                    val ok = value.isNotBlank()
+                    showBottomStatus(if (ok) "Token 已保存，再点一次「反馈到 GitHub」即可" else "已清空 Token")
+                    UiLog.i("崩溃", "Token ${if (ok) "已保存（${value.length} 字符）" else "已清空"}")
+                },
+            )
+        )
+    }
+
+    /**
+     * 设置页「关于 → 崩溃记录」入口：有记录就打开崩溃窗口，没有就明确说没有。
+     *
+     * ⚠️ 动手前必须 `settings.rememberFocus()`：这是 v1.16 需求 3 的约定 ——
+     * 关掉弹层后焦点要回到"刚才那一行"，否则会被系统丢给窗口里第一个可聚焦视图
+     * （用户看到的就是"设置完又跳回第一项了"）。所有设置页入口都走同一套。
+     */
+    private fun openCrashRecordFromSettings() {
+        if (::settings.isInitialized && settings.isOpen) settings.rememberFocus()
+        val rec = CrashStore.read(this)
+        if (rec == null) {
+            showBottomStatus("没有崩溃记录（一切正常）")
+            return
+        }
+        showCrashDialog(rec)
+    }
+
+    /** 设置页「关于 → 崩溃反馈设置」入口（同样是"关掉后焦点回原行"的约定）。 */
+    private fun openFeedbackSettingFromSettings() {
+        if (::settings.isInitialized && settings.isOpen) settings.rememberFocus()
+        showCrashTokenInput()
     }
 
     /**
@@ -998,6 +1306,26 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onBackPressed() {
+        // ---------------------------------------------------------------------------
+        // v1.17：**自绘对话框提到最前面**判断。
+        //
+        // 旧顺序是 `if (!::panel.isInitialized) { super.onBackPressed(); return }` 在最前，
+        // 于是"视图树没建好"的场景（旧崩溃报告屏 / buildUi 失败的最小宿主）按返回键
+        // 直接结束 Activity —— 用户报障原话「一个按钮能退出返回都没有」，
+        // 按返回也只会把应用关掉、重开还是那一屏。
+        // 现在对话框优先：崩溃记录窗口一定能用返回键关掉。
+        // ---------------------------------------------------------------------------
+        if (dialogView != null) {
+            cancelExitConfirm()
+            if (crashDialogOpen) {
+                crashDialogOpen = false
+                handler.removeCallbacks(crashDialogAutoClose)
+                // 用户主动按返回关掉 = 已经看过了 → 下次启动只提一行，不再挡屏
+                runCatching { CrashStore.read(this)?.let { CrashStore.markAcked(this, it) } }
+            }
+            closeAppDialog()
+            return
+        }
         // 判据 11-2 修复：崩溃报告屏（buildUi 被跳过）下 panel 未初始化，
         // 原写法 `panel.visibility` 会在按返回键时同样抛 UninitializedPropertyAccessException。
         if (!::panel.isInitialized) {
@@ -1006,12 +1334,6 @@ class MainActivity : AppCompatActivity() {
         }
         // v1.7：《使用须知》没同意前返回键不做事（必须显式选「已阅读并同意」或「退出应用」）
         if (agreementGate != null) return
-        // 自绘对话框优先：返回键只关对话框。
-        if (dialogView != null) {
-            cancelExitConfirm()
-            closeAppDialog()
-            return
-        }
         // 问题 6：分组管理抽屉优先于面板
         if (groupManageView != null) {
             cancelExitConfirm()
@@ -1652,7 +1974,9 @@ class MainActivity : AppCompatActivity() {
         if (!::channelColumn.isInitialized || !::navColumn.isInitialized) return false
         // 只在"焦点确实在中栏"时接管 —— 焦点在左栏分类时，上下键就该在分类之间走
         val f = currentFocus ?: return false
-        val idx = channelColumn.getChildAdapterPosition(f)
+        // ⚠️ 必须走 adapterPositionIn：焦点常常在左栏分组栏（LinearLayout）上，
+        // 直接 getChildAdapterPosition 会 ClassCastException 崩溃（v1.17 小米电视报障）。
+        val idx = adapterPositionIn(channelColumn, f)
         if (idx < 0) return false
         val count = channelColumn.adapter?.itemCount ?: 0
         if (count <= 0) return false
@@ -1672,6 +1996,49 @@ class MainActivity : AppCompatActivity() {
         navColumn.select(next)
         onNavSelected(next)
         return true
+    }
+
+    /**
+     * 取 [rv] 里包含 [v] 的那一行的**适配器下标**（v1.17 崩溃修复，小米电视真机报障）。
+     *
+     * ---------------------------------------------------------------------------
+     * ⚠️ 为什么不能直接 `rv.getChildAdapterPosition(v)`
+     * ---------------------------------------------------------------------------
+     * 它内部是 `RecyclerView.getChildViewHolderInt(child)`：
+     * ```java
+     * return ((LayoutParams) child.getLayoutParams()).mViewHolder;   // 硬转型
+     * ```
+     * 也就是**无条件**把该视图的 LayoutParams 转成 `RecyclerView.LayoutParams`。
+     * 只要传进去的不是 [rv] 的**直接子视图**，转的就是别人家的 LayoutParams，直接抛：
+     *
+     * ```
+     * java.lang.ClassCastException: android.widget.LinearLayout$LayoutParams
+     *     cannot be cast to androidx.recyclerview.widget.RecyclerView$LayoutParams
+     *     at androidx.recyclerview.widget.RecyclerView.getChildViewHolderInt(RecyclerView.java:4989)
+     *     at ...MainActivity.handlePanelEdgeMove(MainActivity.kt:1655)
+     * ```
+     *
+     * 这正是 v1.16 在小米电视（Android 6.0.1）上的**必崩路径**：
+     * 面板在屏时焦点常常停在**左栏分组栏**上（它是个 LinearLayout，行的 LayoutParams
+     * 就是 `LinearLayout.LayoutParams`），此时按一下上下键 → 上面那行转型 → 崩。
+     * 模拟器上没复现是因为我的验证脚本每次都是先把焦点送进中栏的。
+     *
+     * 正确做法：先沿 `parent` 往上爬到 [rv] 的**直接子视图**，再取下标；
+     * 走过的路径里出现 `null` 或超过 [MAX_CLIMB] 层 —— 说明这个焦点视图压根不在 [rv] 里，
+     * 返回 -1（调用方的语义就是"不在中栏"）。
+     *
+     * 另外仍套一层 `runCatching`：RecyclerView 内部状态异常时宁可返回 -1 也不要再崩一次
+     * （崩溃页上的"反馈"按钮还得靠用户点得动）。
+     */
+    private fun adapterPositionIn(rv: RecyclerView, v: View?): Int {
+        var cur: View = v ?: return -1
+        var climb = 0
+        while (cur.parent !== rv) {
+            val parent = cur.parent as? View ?: return -1
+            cur = parent
+            if (++climb > MAX_CLIMB) return -1
+        }
+        return runCatching { rv.getChildAdapterPosition(cur) }.getOrDefault(-1)
     }
 
     // ---------------- 全屏 ----------------
@@ -1821,6 +2188,12 @@ class MainActivity : AppCompatActivity() {
     private fun showBottomStatus(msg: String, sticky: Boolean = false, durationMs: Long = BOTTOM_STATUS_MS) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             handler.post { showBottomStatus(msg, sticky, durationMs) }
+            return
+        }
+        // v1.17：底栏不存在时（`buildUi` 挂了 → 最小宿主，见 buildUiSafely）降级成 Snackbar。
+        // 崩溃记录里的每一步提示都会走到这里，老设备上绝不能再因为"提示"本身再崩一次。
+        if (!::bottomStatusText.isInitialized) {
+            Snackbar.show(msg, this)
             return
         }
         bottomStatusText.text = msg
@@ -2535,6 +2908,9 @@ class MainActivity : AppCompatActivity() {
                     Snackbar.show("已恢复初始化，重启后生效", this@MainActivity)
                 }
                 onSettingChanged = { applySettingsChanged() }
+                // v1.17：崩溃记录的查看 / 反馈入口（关于分类）
+                onCrashRecord = { openCrashRecordFromSettings() }
+                onFeedbackSetting = { openFeedbackSettingFromSettings() }
             }
             root.addView(settings, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -3341,53 +3717,6 @@ class MainActivity : AppCompatActivity() {
         if (hadNavFocus) navColumn.getChildAt(navIdx)?.requestFocus()
     }
 
-    /** 上次崩溃过就把堆栈显示出来 —— 老设备接不了 adb，只能靠截图定位。 */
-    private fun showCrashReportIfAny(): Boolean {
-        val sp = getSharedPreferences(App.PREFS, MODE_PRIVATE)
-        val report = sp.getString(App.KEY_LAST_CRASH, null) ?: return false
-
-        val col = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xFF141416.toInt())
-            setPadding(s(18f), s(18f), s(18f), s(18f))
-        }
-        col.addView(TextView(this).apply {
-            text = "上次启动崩溃了 —— 把下面这段截图发我即可定位"
-            setTextColor(0xFFFFB4AB.toInt())
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            typeface = Typeface.DEFAULT_BOLD
-        })
-        col.addView(TextView(this).apply {
-            text = report
-            setTextColor(0xFFE3E3E3.toInt())
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            typeface = Typeface.MONOSPACE
-            setTextIsSelectable(true)
-            setPadding(0, s(10f), 0, s(10f))
-        })
-        col.addView(TextView(this).apply {
-            text = "清除记录并重新加载"
-            setTextColor(0xFF101014.toInt())
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            setPadding(s(16f), s(10f), s(16f), s(10f))
-            isFocusable = true
-            isFocusableInTouchMode = true
-            background = UiKit.rounded(Palette.onSurface(this@MainActivity), 8f, this@MainActivity)
-            setOnClickListener {
-                sp.edit().remove(App.KEY_LAST_CRASH).commit()
-                recreate()
-            }
-        })
-
-        val scroll = ScrollView(this).apply {
-            setBackgroundColor(0xFF141416.toInt())
-            addView(col, FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        }
-        setContentView(scroll)
-        return true
-    }
-
     /**
      * 判据 5：把当前频道按**全局序号**记下来（原版 `IPTV_LAST_CHANNEL_IDX` 语义）。
      *
@@ -3597,8 +3926,10 @@ class MainActivity : AppCompatActivity() {
         val entry = navEntries.getOrNull(navIdx) ?: return false
         if (entry.label != NAV_SWITCH_SOURCE) return false
         val f = currentFocus ?: return false
-        // 焦点可能在左栏（分组栏）或中栏；不在中栏的列表行上时 -1
-        val idx = channelColumn.getChildAdapterPosition(f)
+        // 焦点可能在左栏（分组栏）或中栏；不在中栏的列表行上时 -1。
+        // ⚠️ 必须走 adapterPositionIn（同 handlePanelEdgeMove 的注释）：
+        // 左栏是 LinearLayout，焦点在它上面时直接转型必崩。
+        val idx = adapterPositionIn(channelColumn, f)
         if (idx < 0) return false
         val sources = Prefs.sources(this)
         val src = sources.getOrNull(idx) ?: return false   // 末尾「＋ 添加直播源」行 → 不处理
@@ -3630,7 +3961,9 @@ class MainActivity : AppCompatActivity() {
         val entry = navEntries.getOrNull(navIdx) ?: return false
         if (entry.label != NAV_SWITCH_SOURCE) return false
         val row = channelColumn.findChildViewUnder(x, y) ?: return false
-        val idx = channelColumn.getChildAdapterPosition(row)
+        // findChildViewUnder 给的就是直接子视图，但统一走 adapterPositionIn：
+        // 一处转型风险就够崩一次了（见该函数的注释）。
+        val idx = adapterPositionIn(channelColumn, row)
         // 行的下标与 Prefs.sources() 一一对应；末尾的「＋ 添加直播源」越界 → 不处理
         val sources = Prefs.sources(this)
         val src = sources.getOrNull(idx) ?: return false

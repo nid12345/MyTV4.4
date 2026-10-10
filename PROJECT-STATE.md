@@ -25,13 +25,13 @@
 ## 当前进度
 
 - 已完成：**M0 / M1 / M2 / M3（含三项补测） / M4 / M5 / M6 / M7 / M8 / M9 / M10 / M13 / M14**
-- 已交付版本：**v1.0 → v1.16**（`versionCode 6 → 21`），全部已发 GitHub Release（tag `v1.8` / `v1.10`～`v1.16`）
+- 已交付版本：**v1.0 → v1.17**（`versionCode 6 → 22`），全部已发 GitHub Release（tag `v1.8` / `v1.10`～`v1.17`）
 - 进行中：**无**
-- **最新产物**：`dist/MyTV4.4-v1.16-legacy21.apk`（release）/ `dist/MyTV4.4-v1.16-legacy21-debug.apk`
+- **最新产物**：`dist/MyTV4.4-v1.17-legacy22.apk`（release）/ `dist/MyTV4.4-v1.17-legacy22-debug.apk`
 - **签名**：`keystore/mytv-release.jks`（alias=mytv，需备份）；
   SHA-256 `02e143e8102283c2a3d26c505ea5fa44962ff84115eb598cbed467c97236f7c2`（v1.7 起未换钥）
 - **阻塞**：无
-- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.16 = `versionCode 21`）
+- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.17 = `versionCode 22`）
 - 下一个强制汇报检查点：**下一轮用户需求到来时**
 
 ## 📌 已知偏差（记入不追究）
@@ -2291,3 +2291,64 @@ v1.13 的"所有"字面上包含面板 → **回问后用户裁决：包含面�
   （两个 APK 均 `uploaded`）；源码 commit **`eb5af88`**；
   线上回验：清单 versionCode 21 / size 10373918 / md5 c929bc09… 与本地产物一致，
   从 Release 下载的 APK `cmp` 逐字节相同、badging 与证书 `02e143e8…` 一致
+---
+
+# v1.17（versionCode 22 / `1.17-legacy.22`，2026-10-15）
+
+**小米电视真机报障**（MI TV4-ANSM0 / Android 6.0.1）：v1.16 引入的按键崩溃 + 崩溃页把人锁死。
+本轮修崩溃、重做崩溃提示、加一键反馈，并顺带修好老设备访问 GitHub 的证书校验。
+
+## 实现要点（签名级）
+
+| 需求 | 入口 |
+|---|---|
+| 修 `ClassCastException` 崩溃 | 新增 `MainActivity.adapterPositionIn(rv, view)`（沿 parent 爬到 RecyclerView 直接子视图再取下标，不在则 -1）；改掉 3 处调用：`handlePanelEdgeMove` / `handleSourceRowLongPressFromFocus` / `handleSourceRowLongPress` |
+| 崩溃页不再阻塞启动 | 删除 `onCreate` 里的 `if (showCrashReportIfAny()) return` 与旧整屏实现；新增 `buildUiSafely()` / `showBareCrashHost()` / `maybeShowCrashReport()` / `showCrashDialog()` / `dismissCrashDialog()` / `scheduleCrashAutoClose()`；`onBackPressed` 把"对话框优先"提到 `!::panel.isInitialized` 之前 |
+| 一键反馈到 GitHub | 新增 `data/CrashReporter.kt`（REST：搜同名 issue → 有则追加评论、无则新建；错误码→中文文案）；`data/CrashStore.kt`（读写 / 指纹 / 已看过标记）；`Prefs.githubToken`；弹窗三按钮「反馈到 GitHub / 复制记录 / 关闭」 |
+| 崩溃后重启能正常用 | `CrashStore.isAcked/markAcked`（指纹 = trim 后正文 MD5 前 16 位），看过的记录下次只提一行；设置页「关于」新增「崩溃记录」「崩溃反馈设置」两个入口（`SettingsCats.about(ctx, onCrashRecord, onFeedbackSetting)`） |
+| 老设备 TLS 根证书 | 新增 `assets/ca/*.pem`（4 张公开根）+ `Http.init(ctx)` + `extraTrustManager` + `CompositeTrustManager`（系统信任链优先，不通过才用随包根）；`tlsContext` / `applyTls` 改用组合信任链 |
+
+## 崩溃根因（v1.16 回归）
+
+`RecyclerView.getChildAdapterPosition(v)` 内部 `((LayoutParams) v.getLayoutParams()).mViewHolder` **硬转型**；
+v1.16 的 `handlePanelEdgeMove` 直接把 `currentFocus` 丢进去 —— 焦点在左栏（LinearLayout）时就崩：
+
+```
+ClassCastException: android.widget.LinearLayout$LayoutParams cannot be cast to
+  androidx.recyclerview.widget.RecyclerView$LayoutParams
+	at RecyclerView.getChildViewHolderInt(RecyclerView.java:4989)
+	at RecyclerView.getChildAdapterPosition(RecyclerView.java:5008)
+	at MainActivity.handlePanelEdgeMove(MainActivity.kt:1655)
+	at MainActivity.dispatchKeyEvent(MainActivity.kt:1625)
+```
+
+**对照实验**：临时改回旧写法 → 模拟器上复现出**与电视完全一致**的堆栈；恢复修复写法 → 按 8 次上下键 0 崩溃。
+
+## 崩溃页旧实现的三个硬伤（都已修）
+
+1. **没有出口**：返回键走 `!::panel.isInitialized → super.onBackPressed()`，直接结束 Activity。
+2. **按钮够不到**：那个按钮没有显式 `requestFocus()`，电视上方向键没有起点、不会自己跳上去。
+3. **记录不清就永远拦着** → "只能卸载重装"。
+
+现在：界面照常构建、弹窗三按钮可焦点导航、返回键可关、闲置 120 秒自动关、看过一次只提一行、
+设置页随时可再打开。
+
+## 挖出来的第二个真问题：老设备缺根证书
+
+`api.github.com` 在设备上实测链条 `*.github.com ← Sectigo DV E36 ← Sectigo Root E46 (issuer=USERTrust ECC CA)`，
+Android 4.4/6.0 的 CA 库里没有该锚 → `Trust anchor for certification path not found`。
+**内置「检查更新」也一直在报同一个错**（`raw.githubusercontent.com` 等全部 Trust anchor 失败，被静默降级）。
+
+修法：随包 4 张公开根 + 组合信任链（**先系统、不通过才用随包**，只追加不放松）。
+实测：`api.github.com/rate_limit` → HTTP 200；`检查更新` → `清单就绪`。
+
+## 验证（API 19 模拟器 + 真机堆栈）
+
+见 `dist/v1.17-报告.md` 第六节表格（14 项，含真 Token 端到端上传与去重、release 包冒烟）。
+
+## 产物（v1.17，versionCode 22）
+
+- `dist/MyTV4.4-v1.17-legacy22.apk`（release **10,391,413 B**，MD5 `a20e744ca10f7527970787f569c7007f`，证书 `02e143e8…`）
+- `dist/MyTV4.4-v1.17-legacy22-debug.apk`（debug **12,971,775 B**，MD5 `9779532c32a26c1db36a442a25ce072a`，已 zipalign + 重签）
+- `update/version.json` → v1.17 清单
+- 交付报告：`dist/v1.17-报告.md`；验证截图：`dist/evidence/v1.17/`

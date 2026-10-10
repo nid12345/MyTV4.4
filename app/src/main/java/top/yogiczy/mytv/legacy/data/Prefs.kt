@@ -751,6 +751,22 @@ object Prefs {
     }
 
     /**
+     * 崩溃一键反馈用的 GitHub Token（`GITHUB_TOKEN`，默认空 = 未配置）。
+     *
+     * ⚠️ 刻意**不**把它编进 APK：本仓库是公开的，Release 里的 APK 谁都能下，
+     * 写死在包里的写权限等于交给全网。这里只存用户在本机填的那一份，
+     * 并且只发往 `api.github.com`（见 [CrashReporter] 的类注释）。
+     *
+     * 建议填**细粒度 PAT**：仅勾 `nid12345/MyTV4.4` 这一个仓库、只给 `Issues: Read and write`。
+     */
+    fun githubToken(ctx: Context): String =
+        sp(ctx).getString("GITHUB_TOKEN", "").orEmpty()
+
+    fun setGithubToken(ctx: Context, value: String) {
+        sp(ctx).edit().putString("GITHUB_TOKEN", value.trim()).commit()
+    }
+
+    /**
      * 《使用须知》是否已同意（`APP_AGREEMENT_AGREED`，默认 false）。
      *
      * 对应原版 `Configs.appAgreementAgreed`：首次启动先弹全屏《使用须知》，
