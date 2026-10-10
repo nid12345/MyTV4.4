@@ -35,11 +35,10 @@ class App : MultiDexApplication() {
         // 而信任链只在那一刻组装一次（晚一步注入，随包根证书就永远不生效了）。
         top.yogiczy.mytv.legacy.net.Http.init(this)
         enableTls12()
-        // v1.18：崩溃上报换成腾讯 Bugly（国内免费、免 Token）。
-        // ⚠️ 顺序必须在 installCrashLogger() **之前** —— 本地的崩溃记录器会
-        // `previous.uncaughtException(...)` 继续往下传，先装 Bugly 才能保证
-        // "本地留档 + SDK 自动上报"两条都生效（反过来装就成了只留档不上报）。
-        top.yogiczy.mytv.legacy.data.CrashReporter.init(this)
+        // v1.19：崩溃上报换成自建 Cloudflare Worker（mytvbug.nide.qzz.io）。
+        // v1.18 的腾讯 Bugly SDK 已整份删除（APK 体积 -530KB、无第三方 SDK）。
+        // 这里不再有 SDK 初始化动作 —— 上报由用户点「一键反馈」或启动时补报触发，
+        // 崩溃落盘仍由下面的 installCrashLogger 负责。
         installCrashLogger()
         // M5：配置迁移（M2 已实现 Prefs.migrateIfNeeded，但一直没有调用点）。
         // 必须在任何读配置的界面之前执行，否则老版本升级上来的用户会拿到错的默认值。
@@ -89,7 +88,7 @@ class App : MultiDexApplication() {
  *    （M0 之前它就停在 "0.3.1-legacy"，比实际版本落后三个版本）。
  */
 object BuildConfigCompat {
-    const val VERSION_NAME = "1.18-legacy.23"
+    const val VERSION_NAME = "1.19-legacy.24"
 
     /**
      * 版本序号（单调递增）。
@@ -109,6 +108,7 @@ object BuildConfigCompat {
      * ⚠️ v1.16：21。
      * ⚠️ v1.17：22。
      * ⚠️ v1.18：23。
+     * ⚠️ v1.19：24。
      */
-    const val VERSION_CODE = 23
+    const val VERSION_CODE = 24
 }

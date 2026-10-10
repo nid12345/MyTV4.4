@@ -32,6 +32,12 @@ Android 4.4.2 上流畅跑**。
 - **节目单（EPG）**：XMLTV 源；**内置多个节目单，主源失效时自动依次回退**；内置节目单管理列表（切换 / 删除 / 新增自定义源）
 - **经典三段式选台面板**：分组栏 / 频道列 / 节目单列，三态平移；分组栏焦点自动定位；
   **无操作 15 秒才自动收起**（比其它弹层的 5 秒长），选中频道 / 按返回键 / 点面板外空白则立即收起
+- **默认隐藏的分组**（v1.19）：「直播源管理 → 全部分组管理」里，**虎牙**的「4K频道」、
+  **斗鱼**的「4K频道」、**YY轮播**的「4K频道」与「car」这四个分组**默认打开隐藏开关**，
+  不想看时直接装上就能用；
+  只在**该源从未被人手动改过隐藏设置**时才写入默认值 —— 你自己拨过开关的源一律尊重你的选择
+  （包括手动把隐藏关掉，不会又被默认值盖回来）；「恢复初始化」也会带上这四个默认值。
+
 - **二级菜单上下键跨分组顺延**：所有直播源分组（我的收藏 + 各频道分组）行为**完全一致** ——
   末项按下 → 下一分组首项；首项按上 → 上一分组末项；**空分组自动跳过**；
   第一个分组首项按上、最后一个分组末项按下**都不跳**；
@@ -55,7 +61,8 @@ Android 4.4.2 上流畅跑**。
   不会跳回列表开头（触摸点开关、遥控器按确认键两条路径都覆盖）
 - **记忆上次频道**：退出重开直接回到上次观看的频道
 - **崩溃记录 + 一键反馈**：崩了以后重启**照常可用**（不再卡在一个按不动的页面）；崩溃堆栈会存下来，
-  弹窗里点「一键反馈」就直接上传（v1.18 起走**腾讯 Bugly**，免 Token、电视端零配置）；
+  弹窗里点「一键反馈」就上传到**自建的 Cloudflare Worker**（mytvbug.nide.qzz.io，免 Token、电视端零配置、
+  无第三方 SDK），同一条崩溃按堆栈指纹合并、能直接看到复现次数；
   也可以「复制记录」或从「设置 → 关于 → 崩溃记录」随时查看
 - **DLNA 投屏**：SSDP 发现局域网 MediaRenderer，AVTransport 推送当前频道；
   **点一次设备即开始投送**，投送成功后才收起面板并提示结果，失败会留在面板上给出原因
@@ -107,7 +114,7 @@ Android 4.4.2 上流畅跑**。
 侧载安装（无应用商店）：
 
 ```bash
-adb install -r MyTV4.4-v1.18-legacy23.apk
+adb install -r MyTV4.4-v1.19-legacy24.apk
 ```
 
 或把 APK 拷进 U 盘 / 存储卡，用盒子自带的文件管理器安装（需允许「未知来源」）。
@@ -172,6 +179,21 @@ cp keystore.properties.example keystore.properties
 - 调节条是**不拦截触摸**的浮层：它显示的时候，在 1/6 区域继续上下滑**照样能调**，
   热区判定按全屏坐标算，不因浮层而改变。
 
+### 四、触屏长按与滑动在「有弹层时」的表现（v1.19）
+
+**只要屏幕上还有三段式面板以外的任何一层**（总设置页、快捷菜单、节目单弹层、
+各抽屉、对话框、加载提示），下面这些触屏手势**一律不生效**：
+
+| 手势 | 有弹层时 | 干净播放界面时 |
+|---|---|---|
+| 上下滑 | **不响应**（原来会漏到「换频道」，在设置页里滑就把背后频道换了） | 换频道 |
+| 左右滑 | **不响应** | 换线路 |
+| 长按 | **不弹快捷菜单**（原来在设置页长按会顺手把左下角信息框唤出来挡住操作） | 弹快捷菜单 |
+
+唯一例外是**三段式面板自己**：面板在屏时长按中栏频道行 = 收藏/取消收藏、
+长按「换源」列表的行 = 删除该订阅源 —— 这两个是面板自己的语义，
+长按不会再额外弹出快捷菜单把它盖住。
+
 ---
 
 ## 崩溃记录与一键反馈
@@ -189,41 +211,59 @@ cp keystore.properties.example keystore.properties
 > 焦点够不到的按钮、返回键直接结束应用，退出重进还是同一屏 —— 只能卸载重装。
 > 这个坑在小米电视（MI TV4-ANSM0 / Android 6.0.1）上报过一次，已修。
 
-### 一键反馈到哪（v1.18 起：腾讯 Bugly，免 Token）
+### 一键反馈到哪（v1.19 起：自建 Cloudflare Worker）
 
-v1.18 把上报后端换成了**腾讯 Bugly**：国内直连、免费、有网页后台，
-**电视端不需要任何配置**（v1.17 那套"在电视上填 GitHub Token"已整个删除 ——
-国内连 `api.github.com` 本来就不稳，还要用户在遥控器和手机上倒腾一次 PAT，门槛太高）。
+v1.19 把上报后端换成**自建的 Cloudflare Worker**，域名 **mytvbug.nide.qzz.io**：
 
-- **崩溃会自动上报**：Bugly SDK 在启动时初始化，此后 Java / Native / ANR 崩溃
-  由 SDK 自己采集上报，不需要点任何按钮；
-- **「一键反馈」按钮**：崩溃弹窗里的按钮还在，点一下就把本地存的那条记录
-  **当作一次已捕获异常**交给 Bugly（堆栈按 `at ...` 行还原成真实的调用帧，
-  后台看到的文件名与行号与真机一致）；
-- 后台查看：bugly.qq.com →「MyTV4.4」→ 崩溃分析，同一条崩溃按
-  「异常类型 + 版本」聚合，能直接看到复现次数。
+- **以后要修 bug，直接打开 https://mytvbug.nide.qzz.io/admin 就能看到全部崩溃记录**
+  （列表按堆栈指纹合并、带复现次数，点进去是完整堆栈，可一键复制）；
+- 电视端**零配置、免 Token**（v1.17 的 GitHub Token、v1.18 的腾讯 Bugly 都已整份删除）；
+- 不引入任何第三方 SDK —— 上报就是一次 HTTPS POST（`text/plain` 正文 + 一个共享密钥头），
+  APK 体积因此比 v1.18 还小约 530KB；
+- 服务端代码在工程同级的 `mytv-bug-report/` 目录（单文件 Worker + D1 + schema.sql）。
 
-#### 我需要做什么（开发者，一次即可）
+#### 上报的接口长什么样
 
-SDK 需要一个 **App ID**，它是**编译期常量**，不写在电视上、也不让用户填：
+```
+POST https://mytvbug.nide.qzz.io/report
+Content-Type: text/plain; charset=utf-8
+X-Crash-Token: <共享密钥>          ← 与 Worker secret REPORT_TOKEN 一致
+X-App-Version: 1.19-legacy.24
+X-Device-Model: MI TV4-ANSM0
+<正文>                            ← CrashStore 那段：机型 / Android / 版本 / 堆栈
+```
 
-1. <https://bugly.qq.com/v2/index> 用 QQ 登录；
-2. 「产品管理 → 创建产品」→ 类型 **Android** → 包名填 `top.yogiczy.mytv.legacy`；
-3. 把拿到的 **App ID** 填进 `app/src/main/java/.../data/CrashReporter.kt` 的
-   `BUGLY_APP_ID`（同文件还有 `BUGLY_APP_KEY` 预留位）；
-4. 重新编译安装即可。
+服务端：**只接受以「机型:」开头的正文**（挡随手构造的垃圾）、正文 ≤ 64KB、
+每 IP 每分钟 10 次 / 每天 200 次限流、同指纹自动合并计数。
 
-**没填 App ID 时不会报错、不会起后台线程**，只会在点「一键反馈」时给出
-"怎么配置"的说明，并提示先「复制记录」把堆栈直接发给开发者。
+#### 部署（开发者一次）
 
-> 备选通道（用户给的第二个选项）：同一文件里的 `CRASH_UPLOAD_URL` 可以填
-> **任意一个免鉴权的国内 HTTP 接口**，上报就走 `POST text/plain` 直传
-> （带 `X-App-Version` / `X-Device-Model` 两个头）。Bugly App ID 优先，
-> 只有它留空时才走这条。
+```bash
+cd mytv-bug-report
+./deploy.sh        # 登录 → 建 D1 → 建表 → 写 3 个 secret → 部署（自动绑 mytvbug.nide.qzz.io）
+```
 
-兼容性：Bugly `crashreport 4.1.9.3` 的 `minSdkVersion` 是 **15**（读 AAR 内
-AndroidManifest 实测），POM 无传递依赖，兼容本工程的 **API 19**；AAR 的 manifest
-**不自带任何权限声明**，不会往合并后的清单里塞权限。
+或者手工：
+
+```bash
+npx wrangler login
+npx wrangler d1 create mytv-bug                 # 把 database_id 回填进 wrangler.toml
+npx wrangler d1 execute mytv-bug --remote --file=schema.sql
+npx wrangler secret put REPORT_TOKEN            # 与 App 里 CRASH_UPLOAD_TOKEN 一致
+npx wrangler secret put ADMIN_USER
+npx wrangler secret put ADMIN_PASS
+npx wrangler deploy
+```
+
+⚠️ `qzz.io` 必须与这个 Worker 在**同一个 Cloudflare 账号**下，自定义域才绑得上。
+⚠️ 后台默认走 HTTP Basic Auth（账号口令是 secret），**没配 `ADMIN_USER`/`ADMIN_PASS` 时一律拒绝**。
+
+#### 本地自测（不需要 Cloudflare 账号）
+
+```bash
+node dev-server.mjs 8787        # 用真实的 src/index.js + 内存 D1 起真 HTTP
+node test-worker.mjs            # 46 项断言：鉴权/闸门/聚合/后台/限流/路由
+```
 
 ### 老设备的 TLS 根证书
 
@@ -244,11 +284,11 @@ Android 4.4 / 6.0 自带的 CA 库**不会再更新**，而 `api.github.com` 现
 
    ```json
    {
-     "versionCode": 23,
-     "versionName": "1.18-legacy.23",
-     "url": "https://github.com/nid12345/MyTV4.4/releases/download/v1.18/MyTV4.4-v1.18-legacy23.apk",
-     "size": 10944241,
-     "md5": "e236b5cc24cb2a655ee6f8211c15cebb",
+     "versionCode": 24,
+     "versionName": "1.19-legacy.24",
+     "url": "https://github.com/nid12345/MyTV4.4/releases/download/v1.19/MyTV4.4-v1.19-legacy24.apk",
+     "size": 10390716,
+     "md5": "0723c81966216f1294cef29ebe75dec0",
      "notes": "更新说明，可多行"
    }
    ```

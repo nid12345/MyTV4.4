@@ -38,11 +38,12 @@ object SettingsCats {
         // 用户想事后查看 / 补一次反馈，就得有个随时能进的入口。
         //
         // v1.18：旁边那个「崩溃反馈设置（GitHub Token）」入口**已删除** ——
-        // 上报改成腾讯 Bugly 之后，用户在电视上不需要配置任何东西（App ID 只填在代码里一处）。
+        // 上报改成自建服务之后，用户在电视上不需要配置任何东西（地址只写在代码里一处）。
+        // v1.19：换成 Cloudflare Worker（mytvbug.nide.qzz.io），电视端依旧零配置。
         // 所以这里只剩一个"看记录 / 一键反馈"的入口。
         // ---------------------------------------------------------------------------
         val hasCrash = top.yogiczy.mytv.legacy.data.CrashStore.read(ctx) != null
-        val crash = row(ctx, "崩溃记录", "查看上次崩溃堆栈，并一键上报（腾讯 Bugly）")
+        val crash = row(ctx, "崩溃记录", "查看上次崩溃堆栈，并一键上报到崩溃后台")
         crash.setValue(if (hasCrash) "有" else "无")
         crash.onClick = onCrashRecord
         return listOf(

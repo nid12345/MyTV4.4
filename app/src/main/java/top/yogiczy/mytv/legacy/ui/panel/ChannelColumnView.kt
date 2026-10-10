@@ -122,10 +122,13 @@ class ChannelColumnView(context: Context) : RecyclerView(context) {
         rows.addAll(list)
         adapter?.notifyDataSetChanged()
         scrollToPosition(0)
-        // v1.16 需求 2：换组后要落的焦点，等这一帧 layout 完成再落（见 focusEdgeAfterSubmit）。
-        pendingEdge?.let { fromEnd ->
+        // 换组后要落的焦点，等列表真正完成 layout 再落。
+        pendingEdge?.let { pending ->
             pendingEdge = null
-            post { focusRow(if (fromEnd) rows.size - 1 else 0) }
+            focusRow(
+                pos = if (pending.fromEnd) rows.size - 1 else 0,
+                onLanded = pending.onLanded,
+            )
         }
     }
 
@@ -208,36 +211,67 @@ class ChannelColumnView(context: Context) : RecyclerView(context) {
      * 焦点被系统丢给窗口里第一个可聚焦视图 —— 现象就是"左栏已经高亮新分组了，
      * 中栏还是旧内容、且没有任何焦点框"。
      */
-    fun focusEdge(fromEnd: Boolean) {
-        if (rows.isEmpty()) return
-        focusRow(if (fromEnd) rows.size - 1 else 0)
+    fun focusEdge(
+        fromEnd: Boolean,
+        onLanded: (Boolean) -> Unit = {},
+    ) {
+        if (rows.isEmpty()) {
+            onLanded(false)
+            return
+        }
+        focusRow(if (fromEnd) rows.size - 1 else 0, onLanded)
     }
 
-    /** 下一次 [submit] 把内容换完之后，把焦点落到**首项**还是**末项**（见 [focusEdge] 的说明）。 */
-    private var pendingEdge: Boolean? = null
+    /** 下一次 [submit] 完成后需要兑现的焦点落点及完成回调。 */
+    private data class PendingEdge(
+        val fromEnd: Boolean,
+        val onLanded: (Boolean) -> Unit,
+    )
+
+    private var pendingEdge: PendingEdge? = null
 
     /**
-     * v1.16 需求 2：登记"换组后请把焦点落到首/末项"，由紧接着的 [submit] 负责兑现。
+     * 登记「换组后请把焦点落到首/末项」，由紧接着的 [submit] 负责兑现。
      *
-     * 调用时机有讲究 —— 必须在触发换内容的那个调用（`onNavSelected` → `renderChannels`）
-     * **之前**登记，这样 `submit` 落地时才能看到这份意图。
+     * [onLanded] 只有在目标行真正取得焦点或连续多帧仍无法取得焦点后才回调。宿主可在这段
+     * 窗口内屏蔽一级菜单因系统焦点兜底造成的伪选中，避免中栏替换时误跳到「换源」。
      */
-    fun focusEdgeAfterSubmit(fromEnd: Boolean) {
-        pendingEdge = fromEnd
+    fun focusEdgeAfterSubmit(
+        fromEnd: Boolean,
+        onLanded: (Boolean) -> Unit = {},
+    ) {
+        pendingEdge = PendingEdge(fromEnd, onLanded)
     }
 
-    /** 把第 [pos] 行滚进视野并聚焦（同上：允许一帧重试）。 */
-    private fun focusRow(pos: Int) {
-        if (pos < 0 || pos >= rows.size) return
+    /**
+     * 把第 [pos] 行滚进视野并聚焦。
+     *
+     * RecyclerView 的 `scrollToPosition()` 只安排下一次布局；目标是末项时，旧实现只等两次
+     * `post`，在电视慢机或整列换组时仍可能拿不到 ViewHolder，焦点便会被系统交给窗口里的
+     * 第一个可聚焦控件（一级菜单「换源」）。这里改为逐帧重试，直到目标行真正取得焦点。
+     */
+    private fun focusRow(
+        pos: Int,
+        onLanded: (Boolean) -> Unit = {},
+        attemptsLeft: Int = 8,
+    ) {
+        if (pos < 0 || pos >= rows.size) {
+            onLanded(false)
+            return
+        }
         scrollToPosition(pos)
-        post {
-            val vh = findViewHolderForAdapterPosition(pos)
-            if (vh != null) {
-                vh.itemView.requestFocus()
-                return@post
+        postOnAnimation {
+            val target = findViewHolderForAdapterPosition(pos)?.itemView
+            if (target != null && target.requestFocus()) {
+                onLanded(true)
+                return@postOnAnimation
             }
-            // 再等一帧（layout 完成后 ViewHolder 才存在）
-            post { findViewHolderForAdapterPosition(pos)?.itemView?.requestFocus() }
+            if (attemptsLeft > 0) {
+                focusRow(pos, onLanded, attemptsLeft - 1)
+            } else {
+                UiLog.i("界面", "中栏第 ${pos + 1} 项连续多帧未能取得焦点")
+                onLanded(false)
+            }
         }
     }
 

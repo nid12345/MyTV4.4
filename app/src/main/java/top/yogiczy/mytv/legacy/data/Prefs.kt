@@ -146,7 +146,7 @@ object Prefs {
     private const val K_FAVORITES = "favorites"
 
     /** 当前配置版本，每次需要把新默认值刷到老配置上时 +1。与 `Configs.CURRENT_CONFIG_VERSION` 一致。 */
-    const val CURRENT_CONFIG_VERSION = 6
+    const val CURRENT_CONFIG_VERSION = 7
 
     /** 与 `Constants.LOG_HISTORY_MAX_SIZE` 无关，仅用于内置源展示。 */
     fun defaultSource() = IptvSource("自建源", "https://tvlive.nide.qzz.io")
@@ -700,7 +700,44 @@ object Prefs {
             if (missing.isNotEmpty()) saveSources(ctx, cur + missing)
         }
 
+        // v7（v1.19 需求 5）：虎牙 / 斗鱼 / YY轮播 的「4K频道」、YY轮播的「car」
+        // 默认隐藏。用户原话：「默认把直播源管理里面的 虎牙-4k频道、斗鱼-4k频道、
+        // yy轮播-4k频道、yy轮播-car 这几个分组的隐藏开关是打开的」。
+        //
+        // ⚠️ 只补「该源从来没有隐藏记录」的情况：判据是**这个 key 在不在**，而不是列表空不空。
+        // 用户在「全部分组管理」里拨过任何一个开关之后，该源的 key 就已存在（哪怕值是空列表），
+        // 此时一律不动 —— 否则用户手动取消隐藏后，下一次启动又被默认值盖回去，永远关不掉。
+        if (savedVersion < 7) {
+            applyDefaultHiddenGroups(ctx)
+        }
+
         sp(ctx).edit().putInt("APP_CONFIG_VERSION", CURRENT_CONFIG_VERSION).commit()
+    }
+
+    /**
+     * v1.19 需求 5：四个分组**默认隐藏**（只补缺、不覆盖）。
+     *
+     * 分组名是订阅源里 `group-title` 的原文（实测三个源都是 `4K频道`，YY轮播另有 `car`），
+     * 大小写与空格必须与源一致 —— [iptvChannelGroupHiddenList] 是精确匹配。
+     */
+    private val DEFAULT_HIDDEN_GROUPS: Map<String, List<String>> = mapOf(
+        "https://sub.ottiptv.cc/huyayqk.m3u" to listOf("4K频道"),
+        "https://sub.ottiptv.cc/douyuyqk.m3u" to listOf("4K频道"),
+        "https://sub.ottiptv.cc/yylunbo.m3u" to listOf("4K频道", "car"),
+    )
+
+    /**
+     * 把 [DEFAULT_HIDDEN_GROUPS] 写进分组隐藏表（幂等：只补缺失的 key）。
+     *
+     * 也在 [resetAll] 里调 —— 恢复出厂后同样要带上新默认值。
+     */
+    fun applyDefaultHiddenGroups(ctx: Context) {
+        val map = iptvSourceGroupHiddenMap(ctx)
+        var next = map
+        DEFAULT_HIDDEN_GROUPS.forEach { (url, names) ->
+            if (!next.containsKey(url)) next = next + (url to names)
+        }
+        if (next != map) setIptvSourceGroupHiddenMap(ctx, next)
     }
 
     /** 是否显示内置的「潮汕节目回放」分组（`IPTV_CHAOSHAN_SOURCE_ENABLE`，默认 false）。 */
@@ -870,6 +907,9 @@ object Prefs {
     /** 恢复初始化：清掉全部配置（换源面板等保留默认源）。 */
     fun resetAll(ctx: Context) {
         sp(ctx).edit().clear().apply()
+        // v1.19 需求 5：恢复出厂也要带上新默认值（四个分组默认隐藏），
+        // 否则 reset 之后迁移段永远不再跑，默认隐藏就丢了。
+        applyDefaultHiddenGroups(ctx)
         sp(ctx).edit().putInt("APP_CONFIG_VERSION", CURRENT_CONFIG_VERSION).apply()
     }
 

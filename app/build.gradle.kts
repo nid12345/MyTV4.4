@@ -37,8 +37,8 @@ android {
         // ⚠️ 与 App.kt 的 BuildConfigCompat 必须一致：
         //     versionCode ↔ VERSION_CODE（升级通道用它比大小）
         //     versionName ↔ VERSION_NAME
-        versionCode = 23
-        versionName = "1.18-legacy.23"
+        versionCode = 24
+        versionName = "1.19-legacy.24"
         vectorDrawables { useSupportLibrary = true }
         // minSdk < 21 时 core library desugaring 强制要求 multidex
         multiDexEnabled = true
@@ -126,14 +126,10 @@ dependencies {
     // 许可证：Apache-2.0。
     implementation("org.conscrypt:conscrypt-android:2.5.2")
 
-    // v1.18：崩溃上报换成**国内免费、免 Token**的方案（用户要求）。
-    //
-    // 选腾讯 Bugly 的理由：
-    //   · 国内直连、免费、有网页后台 —— 崩了直接看堆栈，不需要给每个客户端配 Token；
-    //   · SDK **自动**采集 Java / Native / ANR 崩溃并上报，App 内不用自己写上传逻辑；
-    //   · minSdk 15（读 AAR 里的 AndroidManifest 实测），**兼容本工程的 API 19**；
-    //   · POM 无传递依赖，不会把整套 AndroidX 拖进来。
-    // ⚠️ App ID 在 `top.yogiczy.mytv.legacy.data.CrashReporter.BUGLY_APP_ID` 里填，
-    //    留空时 SDK 完全不初始化（不打扰、不报错）。
-    implementation("com.tencent.bugly:crashreport:4.1.9.3")
+    // v1.19：崩溃上报换成**自建 Cloudflare Worker**（mytvbug.nide.qzz.io）。
+    // v1.18 引入的腾讯 Bugly SDK（com.tencent.bugly:crashreport:4.1.9.3）已按用户要求整份删除
+    // —— 用户明确"不喜欢用"，且它带来约 530KB 体积与一个第三方 SDK 依赖。
+    // 现在上报走 net/Http.postRaw（HTTPS POST text/plain + 共享密钥头），
+    // 服务端是工程根目录 mytv-bug-report/ 下的 Cloudflare Worker（D1 存储 + Basic Auth 后台）。
+    // **本文件不再新增任何崩溃上报依赖。**
 }

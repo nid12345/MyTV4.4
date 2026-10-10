@@ -1096,8 +1096,8 @@ class MainActivity : AppCompatActivity() {
             "上次启动崩溃了",
             msg,
             listOf(
-                // v1.18：按钮从「反馈到 GitHub」改成「一键反馈」——
-                // 底层换成腾讯 Bugly，**不再需要 Token、也没有任何前置配置步骤**。
+                // v1.19：按钮仍叫「一键反馈」，底层换成自建 Cloudflare Worker
+                // （mytvbug.nide.qzz.io）—— 免 Token、无第三方 SDK、电视端零配置。
                 "一键反馈" to { reportCrash(rec) },
                 "复制记录" to { copyCrashReport(rec) },
                 "关闭" to { dismissCrashDialog(rec) },
@@ -1135,16 +1135,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 「一键反馈」：把这条崩溃上报到**腾讯 Bugly**（v1.18 起）。
+     * 「一键反馈」：把这条崩溃 POST 到**自建的 Cloudflare Worker**（v1.19 起，
+     * 域名 mytvbug.nide.qzz.io；v1.18 的腾讯 Bugly 方案已整份删除）。
      *
      * 用户原话：「移除 Token 依赖，改为国内免费、免 Token、点击直接上传的方案」
      * 「保留原有的"一键反馈"按钮逻辑，点击后直接触发上传，无需用户额外配置」。
      *
-     * 所以这里再也没有 Token 输入、没有任何"先配置一下"的前置步骤：
-     * 点下去就把记录交给 Bugly 的上报通道（App ID 只填在代码里一处，电视端零操作）。
-     *
-     * ⚠️ 上报是**异步**的，所以文案只说"已提交"，不打包票说"服务器已收到" ——
-     * 老网络环境下宁可让用户去后台确认，也不要给一个假的成功感。
+     * 所以这里没有 Token 输入、没有任何"先配置一下"的前置步骤：
+     * 点下去就把记录 POST 到 Worker（地址与共享密钥只写在代码里一处，电视端零操作）。
+     * 之后打开 https://mytvbug.nide.qzz.io/admin 就能看到这条堆栈（Basic Auth）。
      */
     private fun reportCrash(rec: CrashStore.Record) {
         // 先关掉崩溃窗口并给一条"正在…"的反馈，避免用户以为按了没反应
@@ -1152,10 +1151,9 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(crashDialogAutoClose)
         closeAppDialog()
         showBottomStatus("正在上报崩溃记录…", sticky = true)
-        UiLog.i("崩溃", "开始上报（Bugly）：${rec.exceptionName} / ${rec.fingerprint}")
+        UiLog.i("崩溃", "开始上报（Cloudflare Worker）：${rec.exceptionName} / ${rec.fingerprint}")
 
-        // Bugly 的 postCatchedException 本身是异步的，这里仍放后台线程：
-        // 一是不占主线程，二是给"将来换成 HTTP 直传"留出同样的调用形状。
+        // 网络请求放后台线程：不占主线程，也不受崩溃窗口关闭影响。
         Thread {
             val result = try {
                 CrashReporter.upload(this, rec.text)
@@ -1168,7 +1166,7 @@ class MainActivity : AppCompatActivity() {
                     UiLog.i("崩溃", "上报成功：${result.message.replace('\n', ' ')}")
                     // 记下"这条已经处理过"：下次启动不再弹全屏，只在底部提一行。
                     // ⚠️ **不清记录**：内容还有价值（用户可能想看/想再复制一次），
-                    //    而且 Bugly 是异步上报，留档也方便对不上时再发一次。
+                    //    而且 HTTP 上报偶发失败，留档也方便对不上时再发一次。
                     CrashStore.markAcked(this, rec)
                     showCrashResultDialog("已上报", result.message, null)
                 } else {
@@ -1986,10 +1984,23 @@ class MainActivity : AppCompatActivity() {
             "二级菜单${if (down) "到底" else "到顶"}（第 ${idx + 1}/$count 项）→ " +
                 "顺延到「${navEntries[next].label}」"
         )
-        // ⚠️ 顺序：**先登记落点意图**，再切导航项 —— 因为 onNavSelected 会立刻触发
-        // 中栏内容替换（submit），而内容落地是异步的（可能延后一帧）。
-        // 先聚焦再换内容的话，焦点会落在旧内容上、随后被整体替换冲掉（v1.16 实测踩到）。
-        channelColumn.focusEdgeAfterSubmit(fromEnd = !down)
+        // 中栏整列替换时，当前频道行会先被 RecyclerView 移除。Android 会在这一小段窗口里
+        // 把焦点兜底交给窗口里第一个可聚焦控件（一级菜单「换源」）；若不屏蔽，NavColumnView
+        // 的「焦点即选中」回调会立刻把中栏改成订阅源列表，正是“卫视首项按上跳到换源”的根因。
+        // 因此：先屏蔽一级菜单伪选中，等新分组目标行**真正取得焦点**后再解除。
+        navColumn.setFocusSelectSuppressed(true)
+        channelColumn.focusEdgeAfterSubmit(fromEnd = !down) { landed ->
+            if (landed) {
+                navColumn.setFocusSelectSuppressed(false)
+            } else {
+                // 极慢设备再完整重试一轮；仍失败也必须解除屏蔽，避免一级菜单永久失去响应。
+                UiLog.i("界面", "跨组目标行首轮聚焦未落地，重试一次")
+                channelColumn.focusEdge(fromEnd = !down) { retryLanded ->
+                    navColumn.setFocusSelectSuppressed(false)
+                    if (!retryLanded) UiLog.i("界面", "跨组目标行重试后仍未取得焦点")
+                }
+            }
+        }
         navColumn.select(next)
         onNavSelected(next)
         return true
@@ -2470,10 +2481,21 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onLongPress(e: MotionEvent) {
+                // v1.19 需求 2：**有别的弹层在屏时，长按不许唤起快捷菜单（下方信息框）**。
+                // 原来 onLongPress 一个弹层判断都没有（onScreenTap / onScreenSwipe 都有），
+                // 于是在设置页、节目单弹层、对话框、快捷菜单上长按，都会顺手弹出
+                // QuickOpView 那个贴在屏幕左下角的信息块，把用户正在操作的内容挡住。
+                //
+                // 注意：三段式面板**不在**这条排除里 —— 面板自身的长按是有语义的
+                // （换源列表长按删除、频道行长按收藏），所以只排除「面板之外」的覆盖层。
+                if (overlayStack().any { it !== panel }) return
                 // v1.15 需求 5：面板里的「换源」列表上长按 = 删除该订阅源（保底源除外）。
                 // ⚠️ 必须在这里拦，理由见 handleSourceRowLongPress 的注释 ——
                 // 行的 setOnLongClickListener 在**触屏**路径上永远收不到。
                 if (handleSourceRowLongPress(e.x, e.y)) return
+                // v1.19 需求 2：面板在屏时，长按落在中栏频道行/收藏行上要交给行自己的
+                // 长按逻辑（收藏切换 + 删除订阅源都在那里），不能弹快捷菜单把它盖住。
+                if (::panel.isInitialized && panel.visibility == View.VISIBLE && hitPanel(e.x, e.y)) return
                 showQuickMenu()
             }
 
@@ -2569,14 +2591,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun onScreenSwipe(x: Float, y: Float, dx: Float, dy: Float) {
         if (!::panel.isInitialized) return          // 判据 11-2：视图树没建好不走手势
-        if (dialogView != null) return              // 自绘对话框开着时手势不生效
-        if (agreementGate != null) return           // 使用须知没同意前手势不生效
-        if (groupManageView != null) return         // 分组管理抽屉开着时不生效
-        if (dlnaView != null) return                // 投屏抽屉开着时不生效
-        if (epgSourceView != null) return           // v1.8：节目单管理抽屉开着时不生效
-        if (updateProgress != null) return          // v1.8：更新下载进度层在屏时不生效
-        if (linePicker != null) return              // v1.9：多线路选框在屏时不生效
-        if (playerControl != null) return           // v1.9：播放控制弹层在屏时不生效
+        // v1.19 需求 4：**总设置页打开时上下滑不许换台**。
+        // 原来这里只逐个点名了 dialog/agreementGate/groupManageView/dlna/epgSource/
+        // updateProgress/linePicker/playerControl，**漏了 settings**（以及 quickOp /
+        // epgPanel / sourceManageView / loadingTip）。设置页一开，面板早已被收起，
+        // 于是竖滑一路落到下面的 changeChannelBy → 用户看到的就是
+        // 「在设置里上下滑，背后的频道跟着换」。
+        //
+        // 现在改用与 [edgeAdjustAllowed] 同一份权威判据：除了三段式面板本身以外，
+        // 只要还有任何覆盖层在屏（设置页、快捷菜单、节目单弹层、各抽屉、加载提示…），
+        // 一律不响应全屏滑动手势。
+        if (overlayStack().any { it !== panel }) return
 
         val now = android.os.SystemClock.uptimeMillis()
 
@@ -2966,7 +2991,8 @@ class MainActivity : AppCompatActivity() {
                 onSettingChanged = { applySettingsChanged() }
                 // v1.17：崩溃记录的查看 / 一键反馈入口（关于分类）
                 // v1.18：原来的「崩溃反馈设置（GitHub Token）」入口已删除 —— 换成
-                //        腾讯 Bugly 后不需要用户在电视上配置任何东西（App ID 只在代码里一处）
+                //        自建 Cloudflare Worker 后不需要用户在电视上配置任何东西
+                // v1.19：Worker 域名 mytvbug.nide.qzz.io，地址只在代码里一处
                 onCrashRecord = { openCrashRecordFromSettings() }
             }
             root.addView(settings, FrameLayout.LayoutParams(

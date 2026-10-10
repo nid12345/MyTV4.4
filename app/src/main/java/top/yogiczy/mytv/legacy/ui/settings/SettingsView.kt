@@ -71,7 +71,7 @@ class SettingsView(context: Context) : LinearLayout(context) {
     var onResetAll: (() -> Unit)? = null
     var onSettingChanged: (() -> Unit)? = null
 
-    /** v1.17：「关于 → 崩溃记录」——查看上次崩溃堆栈并一键上报（v1.18 起走腾讯 Bugly）。 */
+    /** v1.17：「关于 → 崩溃记录」——查看上次崩溃堆栈并一键上报（v1.19 起走自建 Cloudflare Worker）。 */
     var onCrashRecord: (() -> Unit)? = null
 
     init {
@@ -492,7 +492,8 @@ class SettingsView(context: Context) : LinearLayout(context) {
             contentColumn.removeAllViews()
         val ctx = context
         val rows = when (SettingsCategory.ALL[selected]) {
-            // v1.18：原来的「崩溃反馈设置」回调已删除（Bugly 不需要电视端配置）
+            // v1.18：原来的「崩溃反馈设置」回调已删除（自建 Worker 不需要电视端配置）
+            // v1.19：云端换成 mytvbug.nide.qzz.io
             SettingsCategory.ABOUT -> SettingsCats.about(ctx, { onCrashRecord?.invoke() })
             SettingsCategory.APP -> SettingsCats.app(ctx,
                 { onResetAll?.invoke() }, { onCheckUpdate?.invoke() })
