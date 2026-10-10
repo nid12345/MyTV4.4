@@ -2352,3 +2352,8 @@ Android 4.4/6.0 的 CA 库里没有该锚 → `Trust anchor for certification pa
 - `dist/MyTV4.4-v1.17-legacy22-debug.apk`（debug **12,971,775 B**，MD5 `9779532c32a26c1db36a442a25ce072a`，已 zipalign + 重签）
 - `update/version.json` → v1.17 清单
 - 交付报告：`dist/v1.17-报告.md`；验证截图：`dist/evidence/v1.17/`
+- 已发布：Release `v1.17` → `https://github.com/nid12345/MyTV4.4/releases/tag/v1.17`
+  （两个 APK 均 `uploaded`）；源码 commit **`c080f94`**（6 新增 + 10 修改）；
+  线上回验：清单 versionCode 22 / size 10391413 / md5 a20e744c… 与本地产物一致，
+  从 Release 取回的 APK `cmp` 逐字节相同、badging 与证书 `02e143e8…` 一致
+- 关联 issue：**#1**（本次真机报障的崩溃记录，已由电视端一键反馈创建，附修复说明后关闭）
