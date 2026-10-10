@@ -2285,5 +2285,9 @@ v1.13 的"所有"字面上包含面板 → **回问后用户裁决：包含面�
   证书 SHA-256 `02e143e8…` 与 v1.7 起一致）
 - `dist/MyTV4.4-v1.16-legacy21-debug.apk`（debug **12,951,011 B**，MD5 `2c32cfea73842160719e35d3beb52f3d`，
   已 zipalign + debug keystore 重签）
-- `update/version.json` → v1.16 清单
+- `update/version.json` → v1.16 清单（blob sha `3c2138d`）
 - 交付报告：`dist/v1.16-报告.md`
+- 已发布：Release `v1.16` → `https://github.com/nid12345/MyTV4.4/releases/tag/v1.16`
+  （两个 APK 均 `uploaded`）；源码 commit **`eb5af88`**；
+  线上回验：清单 versionCode 21 / size 10373918 / md5 c929bc09… 与本地产物一致，
+  从 Release 下载的 APK `cmp` 逐字节相同、badging 与证书 `02e143e8…` 一致
