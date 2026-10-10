@@ -122,6 +122,11 @@ class ChannelColumnView(context: Context) : RecyclerView(context) {
         rows.addAll(list)
         adapter?.notifyDataSetChanged()
         scrollToPosition(0)
+        // v1.16 需求 2：换组后要落的焦点，等这一帧 layout 完成再落（见 focusEdgeAfterSubmit）。
+        pendingEdge?.let { fromEnd ->
+            pendingEdge = null
+            post { focusRow(if (fromEnd) rows.size - 1 else 0) }
+        }
     }
 
     /** 远程台标到了：只更新**当前可见**的卡片（滚出去的会在 bind 时自己带上）。 */
@@ -184,6 +189,56 @@ class ChannelColumnView(context: Context) : RecyclerView(context) {
         val first = lm.findFirstVisibleItemPosition()
         val last = lm.findLastVisibleItemPosition()
         if (position < first || position > last) scrollToPosition(position)
+    }
+
+    /**
+     * 聚焦**首项**或**末项**（v1.16 需求 2）。
+     *
+     * 用途：左侧面板里中栏（二级菜单）焦点到边界后顺延到相邻导航项时，
+     * 向下顺延落「首项」、向上顺延落「末项」。
+     *
+     * 为什么不能直接用 `FocusEngine.focusFirstIn` 遍历子视图找末项：
+     * RecyclerView 只渲染**可见**子项，`childCount` 不等于行数；刚换分组时滚动位置在顶部，
+     * 末项根本没有 ViewHolder。所以这里走「先 `scrollToPosition`，再按 adapter 位置取 ViewHolder」，
+     * 并留一帧重试（滚动后要等一次 layout 才拿得到）。
+     *
+     * ⚠️ **换组场景必须用 [focusEdgeAfterSubmit]，不能用这个**（v1.16 实测踩到）：
+     * 换组时内容是异步落地的（`submit` 可能因为 RecyclerView 正在 layout 而被 `post` 延后一帧），
+     * 此刻直接聚焦会**先聚焦到旧内容上**，紧接着 `notifyDataSetChanged` 把视图整体换掉 →
+     * 焦点被系统丢给窗口里第一个可聚焦视图 —— 现象就是"左栏已经高亮新分组了，
+     * 中栏还是旧内容、且没有任何焦点框"。
+     */
+    fun focusEdge(fromEnd: Boolean) {
+        if (rows.isEmpty()) return
+        focusRow(if (fromEnd) rows.size - 1 else 0)
+    }
+
+    /** 下一次 [submit] 把内容换完之后，把焦点落到**首项**还是**末项**（见 [focusEdge] 的说明）。 */
+    private var pendingEdge: Boolean? = null
+
+    /**
+     * v1.16 需求 2：登记"换组后请把焦点落到首/末项"，由紧接着的 [submit] 负责兑现。
+     *
+     * 调用时机有讲究 —— 必须在触发换内容的那个调用（`onNavSelected` → `renderChannels`）
+     * **之前**登记，这样 `submit` 落地时才能看到这份意图。
+     */
+    fun focusEdgeAfterSubmit(fromEnd: Boolean) {
+        pendingEdge = fromEnd
+    }
+
+    /** 把第 [pos] 行滚进视野并聚焦（同上：允许一帧重试）。 */
+    private fun focusRow(pos: Int) {
+        if (pos < 0 || pos >= rows.size) return
+        scrollToPosition(pos)
+        post {
+            val vh = findViewHolderForAdapterPosition(pos)
+            if (vh != null) {
+                vh.itemView.requestFocus()
+                return@post
+            }
+            // 再等一帧（layout 完成后 ViewHolder 才存在）
+            post { findViewHolderForAdapterPosition(pos)?.itemView?.requestFocus() }
+        }
     }
 
     private inner class RowsAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {

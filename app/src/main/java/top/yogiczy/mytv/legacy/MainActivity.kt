@@ -78,7 +78,6 @@ import top.yogiczy.mytv.legacy.ui.settings.SettingsView
 import top.yogiczy.mytv.legacy.ui.settings.GroupManageView
 import top.yogiczy.mytv.legacy.ui.settings.SourceManageView
 import top.yogiczy.mytv.legacy.ui.epg.EpgPanelView
-import top.yogiczy.mytv.legacy.ui.epg.EpgProgressView
 import top.yogiczy.mytv.legacy.ui.Density
 import top.yogiczy.mytv.legacy.ui.Palette
 import top.yogiczy.mytv.legacy.ui.UiKit
@@ -184,8 +183,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var epgColumn: EpgColumnView
     /** 独立 EPG 弹层（长按左键唤出）。 */
     private lateinit var epgPanel: EpgPanelView
-    /** 常驻节目进度（开关默认关）。 */
-    private lateinit var epgProgress: EpgProgressView
+    // v1.16 需求 1（用户）：「左边这个节目表框没必要显示直接去掉」——
+    // 左下角那个「HH:mm 节目名 / 进度条 / 剩余 N 分钟」的常驻块（原 EpgProgressView）
+    // 已**整块移除**：字段、创建、每秒刷新调用，以及 EpgProgressView.kt 文件本身。
+    // 注意与设置里「节目进度」（频道列表**行内**底部进度条）区分 —— 那个保留。
 
     private lateinit var topNumber: TextView
     private lateinit var topDate: TextView
@@ -489,6 +490,59 @@ class MainActivity : AppCompatActivity() {
             "界面",
             "弹层焦点栈同步：栈顶=${top?.javaClass?.simpleName ?: "无"}（共 ${stack.size} 层）"
         )
+        // ---------------------------------------------------------------------------
+        // v1.16 需求 3（用户原话）：「设置菜单里按键逻辑也优化下，比如刚刚设置好新节目表，
+        // 选项光标还是停留在刚刚选项这里，不要一下就又要回到选项一那从头开始按…
+        // 这个逻辑应用到整个设置菜单里」。
+        //
+        // 机制：任何覆盖层（对话框 / 抽屉）被移除时，系统会把焦点交给**窗口里第一个可聚焦视图**
+        // —— 在本工程里就是设置页左栏第一项「关于」。用户看到的就是"设置完跳回开头了"。
+        //
+        // 这里做**统一兜底**：栈顶变成设置页（= 上面的层都关掉了）时，若焦点已不在设置页内，
+        // 就把焦点还给设置页刚才停的那一行。放在这里而不是每个 closeXxx 里，是因为
+        // "谁关的、怎么关的"路径太多（返回键 / 触摸遮罩 / 选中后自动关 / 定时关），
+        // 逐个补一定会漏（v1.16 排查时就发现 closeAppDialog 漏了）。
+        // ---------------------------------------------------------------------------
+        if (top === settings && ::settings.isInitialized && settings.isOpen) {
+            // 30ms：只给"移除视图 → 系统重算焦点"留一点时间；重开抽屉那类流程由
+            // scheduleRestoreSettingsFocus 里的"栈顶检查"负责让路。
+            scheduleRestoreSettingsFocus(delayMs = 30L)
+        }
+    }
+
+    /**
+     * v1.16 需求 3：把焦点还给设置页（**仅当设置页此刻确实是栈顶**）。
+     *
+     * 三个条件全满足才动手：
+     *   ① 设置页还开着；
+     *   ② 它是当前栈顶 —— 这条专门治"抽屉关掉又立刻重开"的时序：
+     *      `closeEpgSourceManage` 里的恢复是 60ms 后执行的，而"添加节目单保存后"
+     *      的流程是「关对话框 → 关抽屉 → 重开抽屉」，60ms 时新抽屉已经在屏上了，
+     *      旧写法会把焦点从抽屉里抢回设置页（用户按键就操作到背后的设置页去了）；
+     *   ③ 焦点确实已经**掉出去**了（见 [SettingsView.needsFocusRestore]）——
+     *      注意判据是"跟打开弹层前比位置变了没"，而不是"还在不在设置页里"：
+     *      系统兜底会把焦点交给左栏第一项「关于」，那也在设置页内，用后者会误判成"没掉"。
+     *
+     * ⚠️ 动手搬之前必须**先 `syncOverlayFocus()` 复位焦点域**（v1.16 实测踩到）：
+     * 覆盖层还在屏上时，`syncOverlayFocus` 把下层的设置页设成了 `FOCUS_BLOCK_DESCENDANTS`；
+     * 而它只在**按键**时被调用 —— 用 BACK 关掉抽屉后如果不再按键，这个 block 状态就一直留着。
+     * 此时 `View.requestFocusNoSearch` 会查父容器的 `descendantFocusability` 并直接返回 false，
+     * 于是"搬焦点"整条链静默失败，用户看到的现象还是跳回左栏。
+     *
+     * @param delayMs 等一帧再判断，给"重开抽屉"这类同步流程留出完成时间。
+     */
+    private fun scheduleRestoreSettingsFocus(delayMs: Long = 60L) {
+        if (!::settings.isInitialized || !settings.isOpen) return
+        handler.postDelayed({
+            if (!::settings.isInitialized || !settings.isOpen) return@postDelayed
+            if (overlayStack().lastOrNull() !== settings) return@postDelayed
+            // ① 复位焦点域（见上面的 ⚠️）
+            syncOverlayFocus()
+            // ② 掉了才搬
+            if (!settings.needsFocusRestore()) return@postDelayed
+            runCatching { settings.restoreContentFocus() }
+            UiLog.i("设置", "弹层关闭后把焦点搬回原位置")
+        }, delayMs)
     }
 
     // ==================== v1.14 需求 2：亮度 / 音量 ====================
@@ -1227,11 +1281,8 @@ class MainActivity : AppCompatActivity() {
         val now = list.firstOrNull { it.isLive() }
         val next = if (now == null) null else list.firstOrNull { it.startAt >= now.endAt }
         showProgrammeInfo(now, next, ch)
-        epgProgress.update(now)
-        // v1.15 需求 3：原来这里还要看「常驻底部节目进度」设置项（默认关）才显示，
-        // 该设置项已整项删除。现在改成**有当前节目就显示**，节目单没到/没这个频道
-        // 的节目信息时自动收起 —— 与「频道项底部进度条」两个开关各管一处，不再叠加。
-        epgProgress.setEnabledByPref(now != null)
+        // v1.16 需求 1：左下角那块常驻节目进度（EpgProgressView）已整块删除，
+        // 这里不再有 update / setEnabledByPref 调用。
         refreshChannelProgrammes()   // 判据 3：中栏每行底部的"当前节目名 + 进度"
         refreshBottomVisibility()   // 判据 1
     }
@@ -1564,7 +1615,63 @@ class MainActivity : AppCompatActivity() {
         if (::epgPanel.isInitialized && epgPanel.isOpen) epgAutoClose.active()
         // v1.13 需求 2：任何按键都给在屏的菜单/窗口续期（面板 15 秒、弹层 5 秒）。
         keepOverlaysAlive()
+        // v1.16 需求 2：面板里二级菜单（中栏）到边界时，上下键**顺延到相邻导航项**。
+        // 必须在这里拦：这是"事件进 View 树之前"的最后一站，再往下就被系统的
+        // focusSearch 接走了（找不到下一个可聚焦项时会静默什么都不做）。
+        // 只认首次按下（repeatCount == 0）—— 按住不放时让系统按原样连续走焦点，
+        // 否则长按一下会"唰"地连跨好几个分组。
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_DOWN -> if (handlePanelEdgeMove(down = true)) return true
+                KeyEvent.KEYCODE_DPAD_UP -> if (handlePanelEdgeMove(down = false)) return true
+            }
+        }
         return if (Keys.dispatch(event, currentKeyHandler())) true else super.dispatchKeyEvent(event)
+    }
+
+    /**
+     * v1.16 需求 2（用户原话）：
+     *   「左侧菜单的按键逻辑优化下，比如说收藏里的二级菜单节目按到最后一个了，
+     *     再按下键直接顺延到下一个分组的二级菜单里去选，同理按上也能顺延到上一个分组
+     *     的二级菜单里去选」。
+     *
+     * 触发条件（全部满足才算）：
+     *   ① 面板在屏；
+     *   ② 焦点落在**中栏**（二级菜单）的某一行上（`getChildAdapterPosition` 能给出下标）；
+     *   ③ 该行已经是列表的**最后一行**（按下键时）或**第一行**（按上键时）。
+     *
+     * 命中后：切到相邻导航项 → 中栏换成新内容 → 焦点落到新列表的**首项**（向下顺延）
+     * 或**末项**（向上顺延）。方向不同、落点也不同，这样"顺着按下去"是连续的。
+     *
+     * 到头的处理：navIdx 已经在两端时不消费，原样交回系统（等价于"没有更多了"）。
+     *
+     * @return true = 已消费
+     */
+    private fun handlePanelEdgeMove(down: Boolean): Boolean {
+        if (!::panel.isInitialized || panel.visibility != View.VISIBLE) return false
+        if (!::channelColumn.isInitialized || !::navColumn.isInitialized) return false
+        // 只在"焦点确实在中栏"时接管 —— 焦点在左栏分类时，上下键就该在分类之间走
+        val f = currentFocus ?: return false
+        val idx = channelColumn.getChildAdapterPosition(f)
+        if (idx < 0) return false
+        val count = channelColumn.adapter?.itemCount ?: 0
+        if (count <= 0) return false
+        val atEdge = if (down) idx == count - 1 else idx == 0
+        if (!atEdge) return false
+        val next = navIdx + (if (down) 1 else -1)
+        if (next !in navEntries.indices) return false
+        UiLog.i(
+            "界面",
+            "二级菜单${if (down) "到底" else "到顶"}（第 ${idx + 1}/$count 项）→ " +
+                "顺延到「${navEntries[next].label}」"
+        )
+        // ⚠️ 顺序：**先登记落点意图**，再切导航项 —— 因为 onNavSelected 会立刻触发
+        // 中栏内容替换（submit），而内容落地是异步的（可能延后一帧）。
+        // 先聚焦再换内容的话，焦点会落在旧内容上、随后被整体替换冲掉（v1.16 实测踩到）。
+        channelColumn.focusEdgeAfterSubmit(fromEnd = !down)
+        navColumn.select(next)
+        onNavSelected(next)
+        return true
     }
 
     // ---------------- 全屏 ----------------
@@ -2432,16 +2539,13 @@ class MainActivity : AppCompatActivity() {
             root.addView(settings, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-            // 常驻节目进度（v1.15 需求 3：原设置开关已删除，改为"有当前节目即显示"，
-            // 见 refreshEpgProgress / EpgProgressView 类注释）
-            epgProgress = EpgProgressView(this)
-          root.addView(epgProgress, FrameLayout.LayoutParams(
-              ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-          // v1.12 需求 2：左边距并入 24dp 网格（原来 28dp，与面板/底栏的 24dp 差 4dp）。
-          // bottomMargin 保持 76dp —— 它要压在底栏之上，不是网格值。
-          ).apply { gravity = Gravity.BOTTOM or Gravity.START; bottomMargin = s(76f); leftMargin = s(panelEdgeDp) })
+            // v1.16 需求 1（用户）：左下角那块常驻节目进度**整块去掉**
+            //（原来在这里 addView(EpgProgressView)）。用户原话：「左边这个节目表框没必要显示直接去掉」。
+            // v1.15 需求 3 删的是它的**设置开关**，当时改成"有当前节目即显示"，
+            // 结果变成一直挂在左下角 —— 这轮按用户要求彻底不显示。
+            // ⚠️ 与设置里「节目进度」（频道列表**行内**底部进度条）无关，那个保留。
 
-          // v1.8：调试叠加层（FPS / 播放器信息 / 布局网格，由设置页「调试」三项控制）
+            // v1.8：调试叠加层（FPS / 播放器信息 / 布局网格，由设置页「调试」三项控制）
           debugOverlay = DebugOverlayView(this)
           root.addView(debugOverlay, FrameLayout.LayoutParams(
               ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -3673,9 +3777,8 @@ class MainActivity : AppCompatActivity() {
         // 那正是设置页左栏的第一项「关于」，于是**设置页会从「节目单」跳回「关于」**，
         // 用户看到的像是"点了之后什么都没发生、还退到别的分类去了"。
         // 现在把焦点还回设置页刚才那一行，让切换结果原地可见。
-        if (::settings.isInitialized && settings.isOpen) {
-            handler.postDelayed({ runCatching { settings.restoreContentFocus() } }, 60L)
-        }
+        // v1.16 需求 3：改走统一入口（带"栈顶是不是设置页"检查，避免关掉又重开时抢焦点）
+        scheduleRestoreSettingsFocus()
     }
 
     // ============ v1.15 需求 2：设置页「管理现有直播源」弹窗 ============
@@ -3760,9 +3863,7 @@ class MainActivity : AppCompatActivity() {
         val v = sourceManageView ?: return
         (v.parent as? ViewGroup)?.removeView(v)
         sourceManageView = null
-        if (::settings.isInitialized && settings.isOpen) {
-            handler.postDelayed({ runCatching { settings.restoreContentFocus() } }, 60L)
-        }
+        scheduleRestoreSettingsFocus()
     }
 
     // ======================= v1.9：多线路选框 / 播放控制（用户需求 5） =======================
@@ -4272,6 +4373,8 @@ class MainActivity : AppCompatActivity() {
         (v.parent as? ViewGroup)?.removeView(v)
         groupManageView = null
         UiLog.i("设置", "分组管理已关闭")
+        // v1.16 需求 3：抽屉关闭后把焦点还给设置页原行（分组管理是从设置页打开的）
+        scheduleRestoreSettingsFocus()
     }
 
     /**
@@ -4550,6 +4653,11 @@ class MainActivity : AppCompatActivity() {
         val v = dialogView ?: return
         (v.parent as? ViewGroup)?.removeView(v)
         dialogView = null
+        // v1.16 需求 3：自绘对话框关掉后，焦点会被系统丢给窗口里第一个可聚焦视图
+        // （= 设置页左栏第一项「关于」）。设置页还在下面时把它还回原行。
+        // ⚠️ 这里必须显式做一次：`syncOverlayFocus` 的兜底要等下一次按键才生效，
+        // 而用户关掉对话框后往往直接就往下按方向键 —— 第一下就会落在「关于」上。
+        scheduleRestoreSettingsFocus(delayMs = 30L)
     }
 
     private fun renderChannels(group: ChannelGroup) {

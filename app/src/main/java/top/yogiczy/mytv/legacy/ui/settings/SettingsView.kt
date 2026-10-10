@@ -313,6 +313,19 @@ class SettingsView(context: Context) : LinearLayout(context) {
     /** v1.9：上一次停留的右栏行号（打开子抽屉前记下，关掉抽屉后搬回去）。 */
     private var lastContentIdx = -1
 
+    /** v1.16 需求 3：上一次停留的**左栏分类**号（用户一直在左栏时用它兜底）。 */
+    private var lastCatIdx = -1
+
+    /**
+     * v1.16 需求 3：打开弹层之前，焦点是在**右栏内容**上（true）还是**左栏分类**上（false）。
+     *
+     * 为什么必须记这一位：弹层被移除后系统会把焦点交给窗口里第一个可聚焦视图 ——
+     * 也就是左栏第一项「关于」。如果用户原本停在右栏，这就是"掉出去了"（要搬回去）；
+     * 如果用户原本就停在左栏，那要对照的是**分类号是否变了**，而不是"在不在设置页里"。
+     * （v1.16 第一版就是只判断"焦点还在不在设置页内"，于是左栏「关于」把判据骗过去了。）
+     */
+    private var lastFocusInContent = false
+
     /**
      * v1.9（用户需求 1）：记下"当前这一行"。宿主在弹出子抽屉（节目单管理 / 分组管理）**之前**调用。
      *
@@ -322,11 +335,35 @@ class SettingsView(context: Context) : LinearLayout(context) {
      */
     fun rememberFocus() {
         val i = focusedContentIndex()
-        if (i >= 0) lastContentIdx = i
+        if (i >= 0) {
+            lastContentIdx = i
+            lastFocusInContent = true
+            return
+        }
+        val c = focusedCategoryIndex()
+        if (c >= 0) {
+            lastCatIdx = c
+            lastFocusInContent = false
+        }
     }
+
+    /**
+     * v1.16 需求 3：焦点是不是**掉出去了**、该把它搬回来。
+     *
+     * 判据按"打开弹层前停在哪儿"分两种（见 [lastFocusInContent]）：
+     *   · 停在右栏 → 只要现在不在右栏任何一行上，就算掉出去；
+     *   · 停在左栏 → 现在的分类号与当时不同，才算掉出去（系统兜底给「关于」正是这种情况）。
+     */
+    fun needsFocusRestore(): Boolean =
+        if (lastFocusInContent) focusedContentIndex() < 0 else focusedCategoryIndex() != lastCatIdx
 
     /** 把焦点搬回 [rememberFocus] 记下的那一行（子抽屉关闭后调用）。 */
     fun restoreContentFocus() {
+        // v1.16 需求 3：按"当初停在哪一列"分两支，而不是永远优先右栏 ——
+        // 用户一直在左栏挑分类时，把他塞进右栏同样是一种"跳位置"。
+        if (!lastFocusInContent && lastCatIdx >= 0 && lastCatIdx < catColumn.childCount) {
+            if (catColumn.getChildAt(lastCatIdx).requestFocus()) return
+        }
         val i = lastContentIdx
         if (i < 0 || i >= contentColumn.childCount) {
             catColumn.getChildAt(selected)?.requestFocus()

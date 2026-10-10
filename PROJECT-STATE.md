@@ -25,13 +25,13 @@
 ## 当前进度
 
 - 已完成：**M0 / M1 / M2 / M3（含三项补测） / M4 / M5 / M6 / M7 / M8 / M9 / M10 / M13 / M14**
-- 已交付版本：**v1.0 → v1.15**（`versionCode 6 → 20`），全部已发 GitHub Release（tag `v1.8` / `v1.10`～`v1.15`）
+- 已交付版本：**v1.0 → v1.16**（`versionCode 6 → 21`），全部已发 GitHub Release（tag `v1.8` / `v1.10`～`v1.16`）
 - 进行中：**无**
-- **最新产物**：`dist/MyTV4.4-v1.15-legacy20.apk`（release）/ `dist/MyTV4.4-v1.15-legacy20-debug.apk`
+- **最新产物**：`dist/MyTV4.4-v1.16-legacy21.apk`（release）/ `dist/MyTV4.4-v1.16-legacy21-debug.apk`
 - **签名**：`keystore/mytv-release.jks`（alias=mytv，需备份）；
   SHA-256 `02e143e8102283c2a3d26c505ea5fa44962ff84115eb598cbed467c97236f7c2`（v1.7 起未换钥）
 - **阻塞**：无
-- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.15 = `versionCode 20`）
+- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.16 = `versionCode 21`）
 - 下一个强制汇报检查点：**下一轮用户需求到来时**
 
 ## 📌 已知偏差（记入不追究）
@@ -2240,3 +2240,50 @@ v1.13 的"所有"字面上包含面板 → **回问后用户裁决：包含面�
   （两个 APK 均 `uploaded`）；源码 commit **`5d689b5`**（1 新增 + 16 修改）；
   线上回验：清单 versionCode 20 / size 10373110 / md5 f2623248… 与本地产物一致，
   从 Release 下载的 APK `cmp` 逐字节相同、badging 与证书 `02e143e8…` 一致
+---
+
+# v1.16（versionCode 21 / `1.16-legacy.21`，2026-10-15）
+
+用户三条体验需求，全部实现并在 API 19 模拟器实测通过。
+
+## 实现要点（签名级）
+
+| 需求 | 入口 |
+|---|---|
+| 1 去掉左下角节目进度框 | `EpgProgressView` **整块删除**（类文件 + 字段 + 创建 + 每秒刷新调用 + import）；与设置里「节目进度」（频道列表**行内**底部进度条）无关，那个保留 |
+| 2 二级菜单跨分组顺延 | `MainActivity.handlePanelEdgeMove(down)`（在 `dispatchKeyEvent` 里、进 View 树之前拦截 DPAD_UP/DOWN 的 repeatCount==0）+ `ChannelColumnView.focusEdgeAfterSubmit(fromEnd)` / `focusEdge()` / `focusRow()` |
+| 3 设置页焦点保持 | `AppDialog.buildConfirm` 之外的统一入口 `scheduleRestoreSettingsFocus()`；`SettingsView.rememberFocus/restoreContentFocus/needsFocusRestore` 三件套；`closeAppDialog` / `closeEpgSourceManage` / `closeSourceManage` / `closeGroupManage` 全部接入 |
+
+## 本轮撞出来的两个关键机制（都写进代码注释了）
+
+1. **换组后聚焦要等"内容落地"**。`onNavSelected` → `renderChannels` → `channelColumn.submit()`，
+   而 `submit` 在 RecyclerView 正在 layout 时会 `post` 延后一帧。先聚焦再换内容的话，
+   焦点会落在**旧内容**上、随后被 `notifyDataSetChanged` 整体替换冲掉 ——
+   现象是"左栏已经高亮新分组，中栏还是旧内容、且没有任何焦点框"。
+   解法：`focusEdgeAfterSubmit()` 先登记落点意图，由 `submit()` 在换完内容后兑现。
+
+2. **`FOCUS_BLOCK_DESCENDANTS` 会静默吃掉 `requestFocus`**。
+   v1.14 的弹层焦点栈在**按键时**才刷新，用 BACK 关掉抽屉后若不再按键，
+   下层的设置页就一直保持 `FOCUS_BLOCK_DESCENDANTS`；
+   而 `View.requestFocusNoSearch` 会检查父容器的 `descendantFocusability` 并直接返回 false ——
+   于是"把焦点搬回设置页原行"整条链静默失败，用户看到的还是跳回左栏。
+   解法：搬焦点**之前先 `syncOverlayFocus()` 复位焦点域**。
+
+## 验证（API 19 模拟器，logcat 专属标记驱动 + 截图）
+
+- 需求 1：播放页左下角只剩带台标的信息块，进度框消失。
+- 需求 2：`二级菜单到底（第 5/5 项）→ 顺延到「卫视频道」` + 落到「湖南卫视」（首项）；
+  `二级菜单到顶（第 1/5 项）→ 顺延到「央视频道」` + 落到「CCTV-13 新闻」（末项）；
+  全程无 `hidePanel 触发`（面板保持打开）；`频道预览（未切台）` 日志证明没有误换台。
+- 需求 3：关闭「节目单管理」抽屉后焦点回到右栏「节目单管理」行（截图）；
+  关闭「管理直播源」弹窗后 `DEBUG 右栏第 3 行聚焦成功`；
+  连续拨动「界面整体缩放比例」的值后焦点停在第 5 项不跳。
+
+## 产物（v1.16，versionCode 21）
+
+- `dist/MyTV4.4-v1.16-legacy21.apk`（release **10,373,918 B**，MD5 `c929bc096c5ec47d9b5c3b9b85b24912`，
+  证书 SHA-256 `02e143e8…` 与 v1.7 起一致）
+- `dist/MyTV4.4-v1.16-legacy21-debug.apk`（debug **12,951,011 B**，MD5 `2c32cfea73842160719e35d3beb52f3d`，
+  已 zipalign + debug keystore 重签）
+- `update/version.json` → v1.16 清单
+- 交付报告：`dist/v1.16-报告.md`
