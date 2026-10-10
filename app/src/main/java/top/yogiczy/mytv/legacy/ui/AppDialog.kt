@@ -3,6 +3,8 @@ package top.yogiczy.mytv.legacy.ui
 import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
+import android.os.Handler
+import android.os.Looper
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -11,6 +13,8 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import top.yogiczy.mytv.legacy.ui.qr.QrCodeView
+import top.yogiczy.mytv.legacy.ui.qr.QrPushServer
 
 /**
  * 应用风格对话框（自绘）。
@@ -35,6 +39,23 @@ object AppDialog {
     /** 构建结果：遮罩根视图 + 建议首先取焦的控件（宿主负责 add 到自己的根容器）。 */
     class Built(val root: View, val firstFocus: View?)
 
+    /**
+     * 「手机扫码隔空填写」的绑定声明（v1.14 需求 4）。
+     *
+     * 调用方**只需声明**"哪个输入框对应手机页上的哪个字段"，剩下的（起服务、生成二维码、
+     * 把收到的内容写回输入框、关对话框时停服务）全部由本类接管 —— 这样"以后任何一个
+     * 涉及输入的地方加扫码"都是一行声明的事。
+     *
+     * @param specs     字段声明，[FieldSpec.inputIndex] 是"第几个输入框"（0 起）
+     * @param onReceive 内容写回输入框**之后**的回调（主线程），可选，用于打日志/联动
+     */
+    class QrPush(
+        val specs: List<FieldSpec>,
+        val onReceive: ((Map<String, String>) -> Unit)? = null,
+    ) {
+        class FieldSpec(val key: String, val label: String, val hint: String, val inputIndex: Int)
+    }
+
     /** 双输入框对话框（"添加直播源"）。 */
     fun buildInput(
         ctx: Context,
@@ -42,6 +63,7 @@ object AppDialog {
         hint1: String,
         hint2: String,
         okLabel: String = "确定",
+        qrPush: QrPush? = null,
         onCancel: () -> Unit,
         onOk: (String, String) -> Unit,
     ): Built {
@@ -55,8 +77,17 @@ object AppDialog {
         panel.addView(input1, lp(dp(ctx, 14f)))
         panel.addView(input2, lp(dp(ctx, 10f)))
 
+        // v1.14 需求 4：扫码卡片放在输入框和按钮之间（打开时才占位）
+        val qrCard = qrPush?.let { push ->
+            buildQrCard(ctx, push, listOf(input1, input2), okLabel).also { panel.addView(it.card, lp(dp(ctx, 12f))) }
+        }
+
         val buttons = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END }
         buttons.addView(button(ctx, "取消", onCancel))
+        if (qrCard != null) {
+            buttons.addView(qrCard.toggle, LinearLayout.LayoutParams(WRAP, WRAP)
+                .apply { marginStart = dp(ctx, 8f) })
+        }
         buttons.addView(button(ctx, okLabel) {
             onOk(input1.text.toString().trim(), input2.text.toString().trim())
         }, LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(ctx, 8f) })
@@ -107,6 +138,7 @@ object AppDialog {
         hint: String,
         initial: String = "",
         okLabel: String = "保存",
+        qrPush: QrPush? = null,
         onCancel: () -> Unit,
         onOk: (String) -> Unit,
     ): Built {
@@ -120,8 +152,16 @@ object AppDialog {
         }
         panel.addView(input1, lp(dp(ctx, 14f)))
 
+        val qrCard = qrPush?.let { push ->
+            buildQrCard(ctx, push, listOf(input1), okLabel).also { panel.addView(it.card, lp(dp(ctx, 12f))) }
+        }
+
         val buttons = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END }
         buttons.addView(button(ctx, "取消", onCancel))
+        if (qrCard != null) {
+            buttons.addView(qrCard.toggle, LinearLayout.LayoutParams(WRAP, WRAP)
+                .apply { marginStart = dp(ctx, 8f) })
+        }
         buttons.addView(button(ctx, okLabel) {
             onOk(input1.text.toString().trim())
         }, LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(ctx, 8f) })
@@ -187,6 +227,138 @@ object AppDialog {
     }
 
     // ---------------- 内部件 ----------------
+
+    /** 扫码卡片：[card] 是展开后显示的二维码区，[toggle] 是按钮行里那个开关按钮。 */
+    private class QrCard(val card: View, val toggle: TextView)
+
+    /**
+     * 「手机扫码隔空填写」卡片（v1.14 需求 4）。
+     *
+     * 结构（展开后）：左侧二维码，右侧三行说明 —— 标题 / 手机要访问的地址 / 状态。
+     * 二维码**默认收起**：电视上九成用户还是用遥控器输入，一进来就占掉半屏会碍事；
+     * 需要手机填时按一下按钮展开，同时才把局域网服务启起来（省电、省端口）。
+     *
+     * 生命周期：服务随卡片展开而启动、随卡片收起或**对话框被摘掉**而停止 ——
+     * 后者注册在 attach 状态监听里，所以宿主怎么关对话框（取消/确定/被别的逻辑清场）
+     * 都不用额外记得来收尾。
+     */
+    private fun buildQrCard(
+        ctx: Context,
+        push: QrPush,
+        inputs: List<EditText>,
+        okLabel: String,
+    ): QrCard {
+        val card = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(ctx, 12f), dp(ctx, 12f), dp(ctx, 12f), dp(ctx, 12f))
+            background = UiKit.rounded(Palette.surface(ctx), 10f, ctx)
+            visibility = View.GONE
+        }
+
+        val qr = QrCodeView(ctx).apply { targetSizePx = dp(ctx, 150f) }
+        card.addView(qr, LinearLayout.LayoutParams(WRAP, WRAP))
+
+        val col = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(ctx, 14f), 0, 0, 0)
+        }
+        val head = TextView(ctx).apply {
+            text = "手机扫码填写"
+            setTextColor(Palette.onSurface(ctx))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val addr = TextView(ctx).apply {
+            setTextColor(Palette.primary(ctx))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            typeface = Typeface.MONOSPACE
+        }
+        val status = TextView(ctx).apply {
+            text = "手机需与本机连同一个无线网络"
+            setTextColor(Palette.onSurfaceVariant(ctx))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setLineSpacing(dp(ctx, 3f).toFloat(), 1f)
+        }
+        col.addView(head)
+        col.addView(addr, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(ctx, 6f) })
+        col.addView(status, LinearLayout.LayoutParams(WRAP, WRAP).apply { topMargin = dp(ctx, 6f) })
+        card.addView(col, LinearLayout.LayoutParams(0, WRAP, 1f))
+
+        // 服务句柄 + 主线程投递（服务端回调在后台线程，改 UI 必须回到主线程）
+        var session: QrPushServer.Session? = null
+        val main = Handler(Looper.getMainLooper())
+
+        fun stopServer() {
+            session?.stop()
+            session = null
+        }
+
+        fun openServer() {
+            if (session?.isRunning == true) return
+            // 每次手机打开表单页都现取一次字段 → 手机页上显示的就是电视上此刻的内容
+            val s = QrPushServer.start(
+                fields = {
+                    push.specs.map { sp ->
+                        QrPushServer.Field(
+                            key = sp.key,
+                            label = sp.label,
+                            hint = sp.hint,
+                            value = inputs.getOrNull(sp.inputIndex)?.text?.toString().orEmpty(),
+                        )
+                    }
+                },
+                onSubmit = { values ->
+                    main.post {
+                        if (!card.isAttachedToWindow) return@post      // 对话框已关 → 丢弃
+                        push.specs.forEach { sp ->
+                            val v = values[sp.key] ?: return@forEach
+                            inputs.getOrNull(sp.inputIndex)?.apply {
+                                setText(v)
+                                setSelection(v.length)
+                            }
+                        }
+                        status.text = "已收到推送，核对后点「$okLabel」"
+                        status.setTextColor(Palette.primary(ctx))
+                        push.onReceive?.invoke(values)
+                    }
+                },
+            )
+            session = s
+            if (s == null) {
+                qr.visibility = View.GONE
+                addr.text = ""
+                status.text = "无法启动扫码服务，请确认本机已联网后重试"
+                status.setTextColor(Palette.error(ctx))
+                return
+            }
+            qr.visibility = View.VISIBLE
+            addr.text = s.url
+            val ok = qr.render(s.url, "扫码打开填写页")
+            status.text = if (ok) {
+                "手机需与本机连同一个无线网络\n扫不出时可手动输入上面的地址"
+            } else {
+                "二维码生成失败，可手动在手机浏览器输入上面的地址"
+            }
+            status.setTextColor(Palette.onSurfaceVariant(ctx))
+        }
+
+        lateinit var toggle: TextView
+        toggle = button(ctx, "手机扫码填写") {
+            val expand = card.visibility != View.VISIBLE
+            card.visibility = if (expand) View.VISIBLE else View.GONE
+            toggle.text = if (expand) "收起二维码" else "手机扫码填写"
+            if (expand) openServer() else stopServer()
+        }
+
+        // 卡片被摘掉（= 对话框关闭）→ 停服务。放在这里宿主就不用管收尾。
+        card.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) = Unit
+            override fun onViewDetachedFromWindow(v: View) = stopServer()
+        })
+
+        return QrCard(card, toggle)
+    }
 
     private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 

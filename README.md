@@ -96,7 +96,7 @@ Android 4.4.2 上流畅跑**。
 侧载安装（无应用商店）：
 
 ```bash
-adb install -r MyTV4.4-v1.13-legacy18.apk
+adb install -r MyTV4.4-v1.14-legacy19.apk
 ```
 
 或把 APK 拷进 U 盘 / 存储卡，用盒子自带的文件管理器安装（需允许「未知来源」）。
@@ -133,11 +133,11 @@ cp keystore.properties.example keystore.properties
 
    ```json
    {
-     "versionCode": 18,
-     "versionName": "1.13-legacy.18",
-     "url": "https://github.com/nid12345/MyTV4.4/releases/download/v1.13/MyTV4.4-v1.13-legacy18.apk",
-     "size": 10337641,
-     "md5": "20d26eddb9be9b1d4c10cb0140546d5a",
+     "versionCode": 19,
+     "versionName": "1.14-legacy.19",
+     "url": "https://github.com/nid12345/MyTV4.4/releases/download/v1.14/MyTV4.4-v1.14-legacy19.apk",
+     "size": 10365796,
+     "md5": "ebd330cd54949259f63508a4bd6cce00",
      "notes": "更新说明，可多行"
    }
    ```

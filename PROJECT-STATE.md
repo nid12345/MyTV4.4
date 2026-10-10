@@ -25,13 +25,13 @@
 ## 当前进度
 
 - 已完成：**M0 / M1 / M2 / M3（含三项补测） / M4 / M5 / M6 / M7 / M8 / M9 / M10 / M13 / M14**
-- 已交付版本：**v1.0 → v1.13**（`versionCode 6 → 18`），全部已发 GitHub Release（tag `v1.8` / `v1.10` / `v1.11` / `v1.12` / `v1.13`）
+- 已交付版本：**v1.0 → v1.14**（`versionCode 6 → 19`），全部已发 GitHub Release（tag `v1.8` / `v1.10`～`v1.14`）
 - 进行中：**无**
-- **最新产物**：`dist/MyTV4.4-v1.13-legacy18.apk`（release）/ `dist/MyTV4.4-v1.13-legacy18-debug.apk`
+- **最新产物**：`dist/MyTV4.4-v1.14-legacy19.apk`（release）/ `dist/MyTV4.4-v1.14-legacy19-debug.apk`
 - **签名**：`keystore/mytv-release.jks`（alias=mytv，需备份）；
   SHA-256 `02e143e8102283c2a3d26c505ea5fa44962ff84115eb598cbed467c97236f7c2`（v1.7 起未换钥）
 - **阻塞**：无
-- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.13 = `versionCode 18`）
+- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.14 = `versionCode 19`）
 - 下一个强制汇报检查点：**下一轮用户需求到来时**
 
 ## 📌 已知偏差（记入不追究）
@@ -2128,3 +2128,50 @@ v1.13 的"所有"字面上包含面板 → **回问后用户裁决：包含面�
   `versionCode 18` + `1.13-legacy.18` + size 10337641 + md5 `20d26edd…`；
   从 Release 真实下载 APK → 10,337,641 B，md5 与本地产物一致且 `cmp` 逐字节相同，
   badging 版本号正确、签名证书 `02e143e8…` 一致
+---
+
+# v1.14（versionCode 19 / `1.14-legacy.19`，2026-10-14）
+
+用户七条需求（加载提示窗 / 边缘滑动调亮度音量 / 弹层前后关系 / 扫码隔空填写 / 分组管理改开关 /
+分组管理免首次加载 / 当前播放项背景加重）全部落地并实测，另修掉 4 个撞出来的真 bug。
+
+## 实现要点（签名级）
+
+| 需求 | 入口 |
+|---|---|
+| 1 加载提示窗 | 新增 `ui/system/LoadingTipView.kt`（白窗/红窗 + 280° 自绘转圈）；`loadSource(url, label, fallbackUrl)` 重写：切换=`hideAllFramesForSourceSwitch()` 铺黑收框 + `player.stop()`，成功 `bottomHoldUntil` 撑底栏 6s，失败红窗 3s 后回退上一源 |
+| 2 边缘调节 | 新增 `ui/system/LevelBarView.kt`；`edgeZoneOf(x)`（左右 25%）+ GestureDetector `onScroll` 增量调节 + 音量键 `stepVolume()`；`setStreamVolume(flags=0)`、亮度只改 window 属性 |
+| 3 弹层栈 | `overlayStack()`（自底向上 11 层）+ `syncOverlayFocus()`：非栈顶 `FOCUS_BLOCK_DESCENDANTS`，在 `dispatchKeyEvent` 进入视图树前收敛；`onScreenTap` 补上 epgPanel/loadingTip 守卫 |
+| 4 扫码填写 | 新增 `ui/qr/QrEncoder.kt`（ISO/IEC 18004 手写：字节模式、M 级、版本 1~6、GF(256) RS、BCH(15,5) 格式位、8 掩码评分；与 python-qrcode 同掩码逐位一致）+ `QrPushServer.kt`（ServerSocket 单页 HTTP + 手机表单）+ `QrCodeView.kt`；`AppDialog.buildInput/buildSingleInput` 增 `qrPush: AppDialog.QrPush`（声明字段↔输入框映射即可，起服务/回填/随对话框关闭停服务全自动） |
+| 5 分组开关 | `GroupManageView` 行尾自绘 `SwitchView`；`BoundRow` 原地刷新（文字+开关+颜色）；数据源改 `iptvSourceGroupNamesMap` 全量名单（不再用过滤后的 groupList）；`renderAll` 名单改**并集**；点击回调每次重读 prefs |
+| 6 免首次加载 | `prefetchMissingGroupNames()`：开「全部分组管理」时后台抓缺失名单（走 fetchSourceBody 链路），`applyPrefetchedGroupNames()` 回填并重绘；失败换 `Row.Note` 失败文案 |
+| 7 当前行背景 | `ChannelCardView.bgCurrent` = 不透明 `surfaceContainerHigh`；新增 `ChannelColumnView.refreshCurrentChannel()` —— 面板收起期间换台后重开面板，就地刷新「正在播放」底色（不重建整列、不丢焦点） |
+
+## 本轮修掉的真 bug（模拟器实测撞到）
+
+1. `Canvas.drawRoundRect(float…)` 是 **API 21+**，API 19 运行时 NoSuchMethodError（LevelBarView 一画就崩）
+   → 全部改 RectF 重载（GroupManageView.SwitchView 一并，原注释把两个重载的 API 级别写反了，已纠正）。
+2. 边缘滑动方向反了：`onScroll` 的 dy = 上次焦点Y − 本次焦点Y（上滑为正）→ `delta = dy / travel`。
+3. `SwitchView` 建行不设初值 → 首帧「显示中」画成关 → `toggleRow` 里 `setState(!row.hidden, false)`。
+4. 调节条卡片被 12dp 竖条决定宽度、文字被挤没 → `minimumWidth = 72dp`；失败提示放宽 3 行 + `maxWidth 62%`。
+
+## 验证（API 19 模拟器，logcat 标记驱动截图 + 像素测量）
+
+- 需求 1：启动非铺黑白窗 / 切换铺黑只留白窗（截图）/ 红窗三行完整原因 / 3s 回退 / 成功后底栏出现（截图）。
+- 需求 2：左上滑 5%→100%、左下滑 100%→33%（截图）；右上滑音量 100%；音量键弹同一条内置条。
+- 需求 3：设置页在上按 6 次方向键，背后面板选中项不动；`弹层焦点栈同步：栈顶=SettingsView（共 2 层）`。
+- 需求 4：`adb forward` + curl 走 GET 表单页 → POST 提交 → 电视端两输入框原地填入 + 「已收到推送」；
+  双输入框（添加直播源）与单输入框（自定义 UA）两个形态都验过。
+- 需求 5：三行开关各自独立保持（截图）；同一行连按 3 次行不消失。
+- 需求 6：`预取分组名 第二测试源 → 2 个`（该源从未手动加载）。
+- 需求 7：像素实测普通行 `(28,29,30)` vs 当前行 `(40,42,44)`=`#282A2C`。
+- QR 正确性：与 python-qrcode 同掩码逐位一致（v2/v3/v4 三例 625/841/1089 格全同）；
+  「设备总选掩码 2」经打点确认是惩罚分分布正常（0=1287…2=1130…），非 bug。
+
+## 产物（v1.14，versionCode 19）
+
+- `dist/MyTV4.4-v1.14-legacy19.apk`（release **10,365,796 B**，MD5 `ebd330cd54949259f63508a4bd6cce00`，已签名，
+  证书 SHA-256 `02e143e8…` 与 v1.7 起一致）
+- `dist/MyTV4.4-v1.14-legacy19-debug.apk`（debug **12,944,138 B**，MD5 `d35fcea59ef31ea9ad9dc22e32e255f9`）
+- `update/version.json` → v1.14 清单
+- 交付报告：`dist/v1.14-报告.md`

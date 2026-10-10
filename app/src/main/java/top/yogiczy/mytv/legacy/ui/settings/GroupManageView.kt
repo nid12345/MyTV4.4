@@ -1,6 +1,9 @@
 package top.yogiczy.mytv.legacy.ui.settings
 
 import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.Gravity
@@ -44,6 +47,14 @@ class GroupManageView(context: Context) : FrameLayout(context) {
             val hidden: Boolean,
             val onClick: () -> Unit,
         ) : Row()
+
+        /**
+         * 非交互说明行（v1.14 需求 6）：
+         * 「正在获取该订阅源的分组…」/「暂时获取不到该订阅源的分组」这类占位。
+         * 之前借用 [Toggle] 并把 hidden 硬编码成 true，会显示出一行自相矛盾的
+         * 「正在获取…　已隐藏　[关]」，还占一个可聚焦位。
+         */
+        data class Note(val text: String) : Row()
     }
 
     /** 返回键 / 点遮罩时关闭。 */
@@ -125,8 +136,32 @@ class GroupManageView(context: Context) : FrameLayout(context) {
         render()
     }
 
-    /** 行视图与它对应的数据（用于**原地**更新状态，避免重建时焦点被系统搬走）。 */
-    private val boundRows = ArrayList<Pair<Row.Toggle, TextView>>()
+    /**
+     * 行视图与它对应的数据（用于**原地**更新状态，避免重建时焦点被系统搬走）。
+     *
+     * v1.14 需求 5：从「(行, 状态文字)」扩成 [(行, 行容器, 开关, 状态文字)] ——
+     * 开关也要在"只改状态、不重建"这条路径上一并刷新，否则切换后文字变了、开关还停在旧位置。
+     */
+    private val boundRows = ArrayList<BoundRow>()
+
+    /** 一行绑定到的视图与数据（v1.14 需求 5 新增）。 */
+    private inner class BoundRow(
+        var row: Row.Toggle,
+        val item: LinearLayout,
+        val switch: SwitchView,
+        val status: TextView,
+    ) {
+        /** 按新数据刷新这一行的显示（状态文字 + 开关），**不重建视图**。 */
+        fun apply(newRow: Row.Toggle) {
+            row = newRow
+            val hidden = newRow.hidden
+            status.text = if (hidden) "已隐藏" else "显示中"
+            status.setTextColor(
+                if (item.isFocused) 0xFF3C4043.toInt() else statusColor(hidden)
+            )
+            switch.setState(checked = !hidden, onLightSurface = item.isFocused)
+        }
+    }
 
     /** 按当前数据重绘列表（切换显隐后由调用方触发）。 */
     fun render() {
@@ -138,14 +173,10 @@ class GroupManageView(context: Context) : FrameLayout(context) {
         // 只更新文本就没有这个问题。
         val toggles = rows.filterIsInstance<Row.Toggle>()
         if (toggles.size == boundRows.size &&
-            toggles.indices.all { toggles[it].label == boundRows[it].first.label }
+            toggles.indices.all { toggles[it].label == boundRows[it].row.label }
         ) {
-            toggles.forEachIndexed { i, row ->
-                val (_, status) = boundRows[i]
-                status.text = if (row.hidden) "已隐藏" else "显示中"
-                status.setTextColor(statusColor(row.hidden))
-                boundRows[i] = row to status
-            }
+            // v1.14 需求 5：这条路径原先只改 status 的文本与颜色，开关会停在旧状态上。
+            toggles.forEachIndexed { i, row -> boundRows[i].apply(row) }
             return
         }
 
@@ -155,6 +186,7 @@ class GroupManageView(context: Context) : FrameLayout(context) {
         rows.forEach { row ->
             when (row) {
                 is Row.Header -> listColumn.addView(headerRow(row.text))
+                is Row.Note -> listColumn.addView(noteRow(row.text))
                 is Row.Toggle -> {
                     val v = toggleRow(row)
                     if (firstFocusable == null) firstFocusable = v
@@ -172,6 +204,22 @@ class GroupManageView(context: Context) : FrameLayout(context) {
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         maxLines = 1
         setPadding(s(10f), s(14f), s(10f), s(6f))
+    }
+
+    /** 非交互说明行（预取占位 / 失败提示）。不可聚焦，视觉上明显比正文弱。 */
+    private fun noteRow(text: String): TextView = TextView(context).apply {
+        this.text = text
+        setTextColor(UiKit.withAlpha(Palette.onSurfaceVariant(context), 0.62f))
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        maxLines = 2
+        setPadding(s(12f), s(12f), s(12f), s(12f))
+        background = UiKit.rounded(
+            UiKit.withAlpha(Palette.surfaceContainer(context), 0.9f), 8f, context)
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = s(6f) }
+        isFocusable = false
+        isClickable = false
     }
 
     private fun toggleRow(row: Row.Toggle): LinearLayout {
@@ -195,17 +243,29 @@ class GroupManageView(context: Context) : FrameLayout(context) {
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
-        val statusColor = statusColor(row.hidden)
         val status = TextView(context).apply {
             text = if (row.hidden) "已隐藏" else "显示中"
-            setTextColor(statusColor)
+            setTextColor(statusColor(row.hidden))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             maxLines = 1
         }
+        // v1.14 需求 5（用户）：行尾改用开关。语义「开 = 显示该分组 / 关 = 隐藏该分组」，
+        // 只有这两个状态 —— 用户明确否掉了"切换三次会删除"的行为。
+        val switch = SwitchView(context)
+
         item.addView(label, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         item.addView(status, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { marginStart = s(12f) })
+        item.addView(switch, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { marginStart = s(12f) })
+
+        val bound = BoundRow(row, item, switch, status)
+        // ⚠️ 必须初始化开关：SwitchView 默认 checked=false，若这里不设初值，
+        //    首次渲染时「显示中」的行也会画成关 —— 实测截图里开关与状态文字正好相反，
+        //    直到这一行第一次获得焦点（focus 回调里 apply）才被纠正。
+        switch.setState(checked = !row.hidden, onLightSurface = false)
 
         item.setOnFocusChangeListener { _, hasFocus ->
             item.background = UiKit.rounded(
@@ -214,16 +274,82 @@ class GroupManageView(context: Context) : FrameLayout(context) {
                 8f, context
             )
             label.setTextColor(if (hasFocus) 0xFF101014.toInt() else Palette.onSurface(context))
-            status.setTextColor(if (hasFocus) 0xFF3C4043.toInt() else statusColor)
+            // 状态文字与开关的「浅底形态」一起刷新 —— 行反色成白底后，
+            // 关态的浅灰滑块会看不见，必须换成深灰（见 SwitchView.onLight）。
+            bound.apply(bound.row)
         }
         item.setOnClickListener { row.onClick() }
-        boundRows.add(row to status)
+        boundRows.add(bound)
         return item
     }
 
     private fun statusColor(hidden: Boolean): Int =
         if (hidden) UiKit.withAlpha(Palette.onSurfaceVariant(context), 0.6f)
         else Palette.primary(context)
+
+    /**
+     * v1.14 需求 5（用户）：与整体风格一致的自绘开关。
+     *
+     * 用户原话：「这个改成开关按钮的形式比较明显」。
+     *
+     * 为什么不用 `android.widget.Switch`：它在 API 19 上是 Holo 风格的
+     * 绿色/蓝色轨道 + 细长滑块，与本应用的深色圆角面板完全不是一套视觉语言 ——
+     * 与 [top.yogiczy.mytv.legacy.ui.AppDialog] 里「不用系统 AlertDialog」同一条理由。
+     *
+     * 语义（用户指定）：**开 = 显示该分组，关 = 隐藏该分组**，只有这两个状态。
+     */
+    private class SwitchView(context: Context) : View(context) {
+
+        private var checked = false
+
+        /**
+         * 是否落在"浅色底"上。
+         *
+         * 分组行获得焦点时整行反色成白底，此刻关态的滑块用的是 `onSurfaceVariant`（浅灰），
+         * 在白底上几乎看不见 —— 所以聚焦时要换成深灰的 `surfaceVariant`。
+         */
+        private var onLight = false
+
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val rect = RectF()
+
+        /** 唯一的更新入口：状态与底色形态必须一起给，避免出现"白底浅滑块"。 */
+        fun setState(checked: Boolean, onLightSurface: Boolean) {
+            if (this.checked == checked && this.onLight == onLightSurface) return
+            this.checked = checked
+            this.onLight = onLightSurface
+            invalidate()
+        }
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            setMeasuredDimension(dp(46f), dp(26f))
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            val r = height / 2f
+            // 轨道（胶囊底）
+            fill.color = when {
+                checked -> Palette.primary(context)
+                onLight -> UiKit.withAlpha(Palette.surfaceVariant(context), 0.85f)
+                else -> Palette.surfaceVariant(context)
+            }
+            // ⚠️ 必须用 **RectF** 重载：`drawRoundRect(float…)` 那个重载是 API 21 才有的，
+            //    在 API 19 上运行时会直接 NoSuchMethodError（实测模拟器当场崩，
+            //    LevelBarView 的竖条就是这么崩的，已一并改掉）。
+            rect.set(0f, 0f, width.toFloat(), height.toFloat())
+            canvas.drawRoundRect(rect, r, r, fill)
+            // 滑块
+            fill.color = when {
+                checked -> Palette.surface(context)
+                onLight -> Palette.surfaceVariant(context)
+                else -> Palette.onSurfaceVariant(context)
+            }
+            canvas.drawCircle(if (checked) width - r else r, r, r - dpF(3f), fill)
+        }
+
+        private fun dp(v: Float) = (v * resources.displayMetrics.density).toInt()
+        private fun dpF(v: Float) = v * resources.displayMetrics.density
+    }
 
     private fun s(dp: Float): Int = (dp * resources.displayMetrics.density).toInt()
 }

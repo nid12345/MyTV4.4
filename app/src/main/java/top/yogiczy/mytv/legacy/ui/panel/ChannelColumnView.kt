@@ -151,6 +151,32 @@ class ChannelColumnView(context: Context) : RecyclerView(context) {
         }
     }
 
+    /**
+     * 就地刷新「正在播放」行标记（v1.14 需求 7）。
+     *
+     * 面板收起期间用户可能用上下键 / 数字键换过台，中栏上次渲染的 `current`
+     * 已经过期 —— 但整列重建（[submit]）会丢焦点与滚动位置，所以这里只改行数据
+     * 与**可见**卡片的底色，与 [updateProgrammes] 是同一套路。
+     */
+    fun refreshCurrentChannel(currentName: String?) {
+        var changed = 0
+        for (k in rows.indices) {
+            val r = rows[k]
+            if (r is Row.ChannelRow) {
+                val now = r.channel.name == currentName
+                if (r.current != now) {
+                    rows[k] = r.copy(current = now)
+                    changed++
+                }
+            }
+        }
+        if (changed == 0) return
+        for (i in 0 until childCount) {
+            val vh = getChildViewHolder(getChildAt(i))
+            if (vh is RowsAdapter.ChannelVH) vh.refreshCurrent(currentName)
+        }
+    }
+
     /** 把某一项滚进视野（换台 / 焦点恢复时用）。 */
     fun revealPosition(position: Int) {
         if (position < 0 || position >= rows.size) return
@@ -197,6 +223,11 @@ class ChannelColumnView(context: Context) : RecyclerView(context) {
             RecyclerView.ViewHolder(card) {
 
             private var boundName: String? = null
+
+            fun refreshCurrent(currentName: String?) {
+                val ch = card.channel ?: return
+                card.setCurrent(ch.name == currentName)
+            }
 
             fun bind(row: Row.ChannelRow, position: Int) {
                 boundName?.let { boundCards[it]?.remove(card) }

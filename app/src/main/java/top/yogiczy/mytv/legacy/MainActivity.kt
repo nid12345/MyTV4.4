@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -82,6 +83,8 @@ import top.yogiczy.mytv.legacy.ui.Palette
 import top.yogiczy.mytv.legacy.ui.UiKit
 import top.yogiczy.mytv.legacy.ui.quickop.QuickOpView
 import top.yogiczy.mytv.legacy.ui.system.ClampedLinearLayout
+import top.yogiczy.mytv.legacy.ui.system.LevelBarView
+import top.yogiczy.mytv.legacy.ui.system.LoadingTipView
 import top.yogiczy.mytv.legacy.ui.system.ScreenAutoClose
 import top.yogiczy.mytv.legacy.ui.system.Snackbar
 import java.text.SimpleDateFormat
@@ -326,6 +329,298 @@ class MainActivity : AppCompatActivity() {
         if (dlnaView != null) dlnaCastAutoClose.active()
         if (epgSourceView != null) epgSourceAutoClose.active()
         if (groupManageView != null) groupManageAutoClose.active()
+    }
+
+    // ==================== v1.14 需求 1：加载直播源的提示窗 ====================
+
+    /**
+     * 加载提示窗。
+     *
+     * 懒建：首次显示时才挂到 [rootView] 上并 `bringToFront()` ——
+     * 与自绘对话框（[showAppDialog]）同一套约定，天然满足"后开的在上面"。
+     */
+    private var loadingTip: LoadingTipView? = null
+
+    /** 正在加载 / 切换订阅源。期间右下角信息框一律不显示（用户要求"右下角先不要有弹窗"）。 */
+    private var sourceLoading = false
+
+    /**
+     * 加载成功后把右下角信息框主动顶出来的截止时刻。
+     *
+     * 用户要求「加载成功后就消失，换底部详细信息的框弹出，以显示当前节目详情」——
+     * 但底栏原本只在"面板在屏"或"有状态消息"时才显示，刚加载完两者都不成立，
+     * 于是需要这个"主动保留窗口"把它撑出来（见 [refreshBottomVisibility]）。
+     */
+    private var bottomHoldUntil = 0L
+
+    private val bottomHoldExpire = Runnable {
+        bottomHoldUntil = 0L
+        refreshBottomVisibility()
+    }
+
+    /** 切换源失败后红色提示停留多久再回退 —— 用户要求"三秒左右"。 */
+    private val LOAD_FAIL_FALLBACK_MS = 3_000L
+
+    /** 加载成功后右下角信息框显示多久（给用户看清当前节目详情）。 */
+    private val SOURCE_READY_INFO_MS = 6_000L
+
+    /** 显示「正在加载直播源」提示窗。[opaque] = true 时铺全屏黑（切换订阅源用）。 */
+    private fun showLoadingTip(text: String, opaque: Boolean) {
+        if (!::rootView.isInitialized) return
+        val v = loadingTip ?: LoadingTipView(this).also {
+            loadingTip = it
+            rootView.addView(it, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+        v.setOpaque(opaque)
+        v.showTip(text, LoadingTipView.Kind.LOADING)
+        v.bringToFront()
+        UiLog.i("界面", "加载提示窗显示：$text（铺黑底=$opaque）")
+    }
+
+    /** 把提示窗切成失败态（红色，同一位置）。 */
+    private fun showLoadingErrorTip(text: String) {
+        val v = loadingTip ?: return
+        v.showTip(text, LoadingTipView.Kind.ERROR)
+        v.bringToFront()
+        UiLog.i("界面", "加载提示窗失败态：$text")
+    }
+
+    private fun hideLoadingTip() {
+        if (loadingTip?.visibility == View.VISIBLE) UiLog.i("界面", "加载提示窗隐藏")
+        loadingTip?.hideTip()
+    }
+
+    /**
+     * v1.14 需求 1：切换订阅源时「全部其他框都不要显示」。
+     *
+     * 提示窗自己会铺一层全屏黑把画面盖住，但**底层的弹层仍然在**、仍然会抢按键，
+     * 所以这里逐个收掉（顺序从最外层往里）。全部用 runCatching 包住：
+     * 这些 close 各自都会检查自己的视图是否存在，但这里不想让任何一个的异常
+     * 中断整条切换链路。
+     */
+    private fun hideAllFramesForSourceSwitch() {
+        runCatching { closeAppDialog() }
+        runCatching { closePlayerControl() }
+        runCatching { closeLinePicker() }
+        runCatching { closeDlnaCast() }
+        runCatching { closeEpgSourceManage() }
+        runCatching { closeGroupManage() }
+        runCatching { closeUpdateProgress() }
+        runCatching { if (::epgPanel.isInitialized && epgPanel.isOpen) closeEpgPanel() }
+        runCatching { if (::settings.isInitialized && settings.isOpen) settings.close() }
+        runCatching { if (::quickOp.isInitialized && quickOp.isOpen) quickOp.close() }
+        runCatching { hidePanel() }
+        runCatching { hideTempInfoBlock() }
+        runCatching { clearBottomStatus() }
+        // v1.14 需求 1：用户要求切换源时"黑屏" —— 提示窗那层全屏黑只盖住画面，
+        // **声音还会继续**。这里把播放器停掉，做到真正的"只剩一个白色提示窗"。
+        // 新源就位后会由 selectChannel → player.play(channel) 重新起播。
+        runCatching { if (::player.isInitialized) player.stop() }
+        if (::bottomBar.isInitialized) bottomBar.visibility = View.GONE
+        if (::tempInfoBar.isInitialized) tempInfoBar.visibility = View.GONE
+    }
+
+    // ==================== v1.14 需求 3：弹层的前后关系 ====================
+
+    /** 上一轮同步过的栈顶（用来跳过无变化的同步，见 [syncOverlayFocus]）。 */
+    private var overlayFocusTop: View? = null
+
+    /**
+     * 当前在屏的覆盖层，**从底到顶**排。
+     *
+     * 顺序按"语义优先级"给（不是 rootView 里的真实 z 序 —— 真实 z 序对判断
+     * "谁该拿焦点"没有意义，用户关心的是"我最后打开的那个"）。
+     */
+    private fun overlayStack(): List<View> {
+        val stack = ArrayList<View>(8)
+        if (::panel.isInitialized && panel.visibility == View.VISIBLE && !panelDismissing) {
+            stack += panel
+        }
+        if (::quickOp.isInitialized && quickOp.isOpen) stack += quickOp
+        if (::epgPanel.isInitialized && epgPanel.isOpen) stack += epgPanel
+        if (::settings.isInitialized && settings.isOpen) stack += settings
+        groupManageView?.let { stack += it }
+        epgSourceView?.let { stack += it }
+        dlnaView?.let { stack += it }
+        linePicker?.let { stack += it }
+        playerControl?.let { stack += it }
+        updateProgress?.let { stack += it }
+        dialogView?.let { stack += it }
+        agreementGate?.let { stack += it }
+        loadingTip?.takeIf { it.visibility == View.VISIBLE }?.let { stack += it }
+        return stack
+    }
+
+    /**
+     * v1.14 需求 3（用户原话）：「全局任何情况下的弹窗，只要有重叠的弹窗的情况下按键和
+     * 触屏的触控范围都有明确前后关系 …… 不要有明明 b 弹窗在前了，按键还能调节到 a 到界面里，
+     * 这个情况特别在总设置菜单里出现过」。
+     *
+     * 根因：各弹层都是 [rootView] 的**平级**子 View。`descendantFocusability` 只能保证
+     * "焦点优先进自己的子树"，**管不住焦点跑到兄弟子树去** —— 设置页打开时方向键按到
+     * 列表边界，`focusSearch()` 会一路找到背后的三段式面板 / 快捷菜单上，
+     * 再按确认键就操作到了下层（用户报的就是这个）。
+     *
+     * 修法：**按键进入视图树之前**（[dispatchKeyEvent]）把"除栈顶以外的所有层"
+     * 置为 `FOCUS_BLOCK_DESCENDANTS` —— 整棵子树退出焦点搜索范围；
+     * 栈顶恢复成 `FOCUS_AFTER_DESCENDANTS`。这样返回键关掉栈顶后，
+     * 下一轮同步会自动把次顶层放回来，`a` 才重新可操作。
+     *
+     * ⚠️ 只改 `descendantFocusability`，**不动 `isFocusable`** ——
+     * 各层自己的 isFocusable 是有语义的（比如提示窗刻意要能吃掉触摸），
+     * 这里只需要"焦点进不去"。
+     */
+    private fun syncOverlayFocus() {
+        val stack = overlayStack()
+        val top = stack.lastOrNull()
+        if (top === overlayFocusTop) return        // 栈顶没变 → block 关系也不用变
+        overlayFocusTop = top
+        stack.forEach { v ->
+            // `descendantFocusability` 只在 ViewGroup 上 —— 各覆盖层的根都是容器，
+            // 但字段类型是 View（见 dialogView 等），所以这里安全转换一次。
+            val g = v as? ViewGroup ?: return@forEach
+            g.descendantFocusability = if (v === top) {
+                ViewGroup.FOCUS_AFTER_DESCENDANTS
+            } else {
+                ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            }
+        }
+        UiLog.i(
+            "界面",
+            "弹层焦点栈同步：栈顶=${top?.javaClass?.simpleName ?: "无"}（共 ${stack.size} 层）"
+        )
+    }
+
+    // ==================== v1.14 需求 2：亮度 / 音量 ====================
+
+    /** 内置调节条（懒建，与加载提示窗同一套约定）。 */
+    private var levelBar: LevelBarView? = null
+
+    /** 当前亮度 0f..1f；< 0 = 还没调过（首次调节时读系统亮度作起点）。 */
+    private var brightnessLevel = -1f
+
+    /** 调节条显示时长 —— 与系统音量条同量级。 */
+    private val LEVEL_BAR_HIDE_MS = 2_000L
+
+    private val levelBarHide = Runnable { levelBar?.hide() }
+
+    /** 边缘手势"满量程"行程：滑过屏高 60% ≈ 从 0 调到 100%。 */
+    private val edgeFullTravelPx: Float
+        get() = resources.displayMetrics.heightPixels * 0.6f
+
+    /** 进入边缘调节模式所需的最小竖向位移（避免把轻微抖动当成调节）。 */
+    private val EDGE_MIN_PX = 24f
+
+    /** 左 1/4 = 亮度区，右 1/4 = 音量区，中间一半留给换台手势。 */
+    private enum class EdgeZone { BRIGHTNESS, VOLUME }
+
+    private fun edgeZoneOf(x: Float): EdgeZone? {
+        val w = resources.displayMetrics.widthPixels
+        return when {
+            x < w * 0.25f -> EdgeZone.BRIGHTNESS
+            x > w * 0.75f -> EdgeZone.VOLUME
+            else -> null
+        }
+    }
+
+    private fun showLevelBar(kind: LevelBarView.Kind, value: Float) {
+        if (!::rootView.isInitialized) return
+        val v = levelBar ?: LevelBarView(this).also {
+            levelBar = it
+            rootView.addView(it, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+        v.show(kind, value)
+        v.bringToFront()
+        handler.removeCallbacks(levelBarHide)
+        handler.postDelayed(levelBarHide, LEVEL_BAR_HIDE_MS)
+    }
+
+    // ---- 亮度 ----
+
+    /** 当前亮度；首次调用时用**系统亮度**作起点（窗口值是 -1 = 跟随系统）。 */
+    private fun ensureBrightness(): Float {
+        if (brightnessLevel < 0f) {
+            val sys = runCatching {
+                android.provider.Settings.System.getInt(
+                    contentResolver, android.provider.Settings.System.SCREEN_BRIGHTNESS
+                )
+            }.getOrDefault(128).coerceIn(0, 255)
+            brightnessLevel = (sys / 255f).coerceIn(0.05f, 1f)
+        }
+        return brightnessLevel
+    }
+
+    /**
+     * 设亮度。
+     *
+     * ⚠️ 只改**本窗口**的亮度（`window.attributes.screenBrightness`），不写系统设置 ——
+     * 写系统设置要 `WRITE_SETTINGS` 权限（API 23+ 还要走用户授权页），
+     * 而这里要的只是"看直播时调暗一点"，退出应用后本就该恢复原样。
+     */
+    private fun setBrightness(v: Float) {
+        brightnessLevel = v.coerceIn(0.05f, 1f)
+        runCatching {
+            val lp = window.attributes
+            lp.screenBrightness = brightnessLevel
+            window.attributes = lp
+        }
+    }
+
+    // ---- 音量 ----
+
+    private fun audioManager(): AudioManager? =
+        getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+
+    private fun volumeRatio(): Float {
+        val am = audioManager() ?: return 0f
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        return am.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max
+    }
+
+    /**
+     * 设媒体音量。
+     *
+     * ⚠️ `flags` 传 **0**（不传 `FLAG_SHOW_UI`）—— 用户明确要求不要显示系统调节条。
+     */
+    private fun setVolumeRatio(r: Float) {
+        val am = audioManager() ?: return
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        val v = Math.round(r.coerceIn(0f, 1f) * max).coerceIn(0, max)
+        runCatching { am.setStreamVolume(AudioManager.STREAM_MUSIC, v, 0) }
+    }
+
+    /** 按"格"调音量并刷新内置条（音量键走这条）。 */
+    private fun stepVolume(step: Int) {
+        val am = audioManager() ?: return
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        val next = (am.getStreamVolume(AudioManager.STREAM_MUSIC) + step).coerceIn(0, max)
+        runCatching { am.setStreamVolume(AudioManager.STREAM_MUSIC, next, 0) }
+        showLevelBar(LevelBarView.Kind.VOLUME, next.toFloat() / max)
+    }
+
+    /**
+     * 边缘竖向滑动按**增量**调节（[dy] 是本次事件的位移，向下为正）。
+     *
+     * 上滑 = 变大、下滑 = 变小，与系统音量条方向一致。
+     */
+    private fun adjustEdgeBy(zone: EdgeZone, dy: Float) {
+        // GestureDetector.onScroll 的 dy = 上一次焦点Y - 本次焦点Y：
+        // **手指上滑 dy > 0**（实测上滑后亮度掉到 5% 才发现写反了），所以这里是 +dy。
+        val delta = dy / edgeFullTravelPx
+        when (zone) {
+            EdgeZone.BRIGHTNESS -> {
+                val v = (ensureBrightness() + delta).coerceIn(0.05f, 1f)
+                setBrightness(v)
+                showLevelBar(LevelBarView.Kind.BRIGHTNESS, v)
+            }
+            EdgeZone.VOLUME -> {
+                val v = (volumeRatio() + delta).coerceIn(0f, 1f)
+                setVolumeRatio(v)
+                showLevelBar(LevelBarView.Kind.VOLUME, v)
+            }
+        }
     }
 
     /**
@@ -1231,6 +1526,25 @@ class MainActivity : AppCompatActivity() {
      * 短按仍按原版在 ACTION_UP 触发，所以这里 DOWN/UP 都交给 [Keys.dispatch]。
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // v1.14 需求 1：加载 / 切换订阅源期间吃掉**所有**按键。
+        // 此刻底层的频道列表正在被整体替换，任何操作都可能落在半旧半新的状态上；
+        // 而且提示窗是模态的，用户此时也没有可操作的对象。
+        // ⚠️ 绝不能放行：返回键会一路落到 Activity 默认实现，**直接退出应用**。
+        if (sourceLoading) return true
+        // v1.14 需求 2：音量键也走**应用内置调节条**。
+        // `setStreamVolume(..., flags = 0)` 刻意不传 `FLAG_SHOW_UI`，
+        // 所以系统那条音量 UI 不会冒出来（用户要求"不要显示系统的调节显示条"）。
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    stepVolume(if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) +1 else -1)
+                }
+                return true
+            }
+        }
+        // v1.14 需求 3：按键进入视图树**之前**先把焦点域收敛到最顶层弹层 ——
+        // 否则方向键会从当前弹层边界"漏"到背后的层上去（详见 syncOverlayFocus 的注释）。
+        syncOverlayFocus()
         // 判据 1：EPG 弹层开着时任何按键都算"用户操作"，重新计时。
         if (::epgPanel.isInitialized && epgPanel.isOpen) epgAutoClose.active()
         // v1.13 需求 2：任何按键都给在屏的菜单/窗口续期（面板 15 秒、弹层 5 秒）。
@@ -1269,6 +1583,9 @@ class MainActivity : AppCompatActivity() {
      * 后者一旦返回 true 就把事件截住了，面板里的列表项和按钮会全部点不动。
      */
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        // v1.14 需求 1：加载 / 切换订阅源期间触摸全部吃掉 ——
+        // 提示窗是模态的，不允许点穿到下面去（否则会顺手唤出三段式面板）。
+        if (sourceLoading) return true
         // 判据 11-2（真机 oppo R11s Plus 崩溃，触摸路径）：`showCrashReportIfAny()` 为真时
         // `onCreate` 会**整体跳过 `buildUi()`**，`panel` 等 lateinit 视图根本没建 ——
         // 而只要手指点一下屏幕，手势识别就会走到 `onScreenTap` 里读 `panel.visibility` →
@@ -1312,6 +1629,9 @@ class MainActivity : AppCompatActivity() {
         wakeFocusChannelName = lastFocusedChannelName
         if (::navColumn.isInitialized) navColumn.setFocusSelectSuppressed(true)
         panel.visibility = View.VISIBLE
+        // v1.14 需求 7：面板收起期间用户可能用上下键 / 数字键换过台，中栏上次渲染的
+        // 「正在播放」底色已经过期 —— 就地刷一遍（不重建整列，保住焦点与滚动位置）。
+        runCatching { channelColumn.refreshCurrentChannel(currentChannel?.name) }
         UiLog.i("界面", "showPanel 已置 VISIBLE=${panel.visibility}")
         // 问题 1：面板刚出来时焦点还没进二级，一级的选中白框应是实心的
         if (::navColumn.isInitialized) navColumn.setDimmed(false)
@@ -1433,7 +1753,11 @@ class MainActivity : AppCompatActivity() {
         // 问题 1（用户）：收起动画期间不算"在屏"，右下角信息立即消失
         val panelVisible = ::panel.isInitialized &&
             panel.visibility == View.VISIBLE && !panelDismissing
-        val show = panelVisible || statusAlive
+        // v1.14 需求 1：加载成功后主动把信息框撑开的窗口（原因见 bottomHoldUntil 的注释）。
+        val holdAlive = SystemClock.uptimeMillis() < bottomHoldUntil
+        // v1.14 需求 1：加载 / 切换订阅源期间右下角一律不显示 ——
+        // 用户原话「每次刚打开进入 app 的时候，右下角先不要有弹窗」。
+        val show = (panelVisible || statusAlive || holdAlive) && !sourceLoading
         bottomBar.visibility = if (show) View.VISIBLE else View.GONE
         if (show && !bottomStatusSticky && bottomStatusUntil > 0L) {
             // v1.11：按**剩余时间**续期（原来写死 BOTTOM_STATUS_MS+80，长提示会被提前收掉）
@@ -1605,8 +1929,17 @@ class MainActivity : AppCompatActivity() {
             /** 一次触摸序列只认一次滑动（DOWN 时复位）。 */
             private var swipeConsumed = false
 
+            /**
+             * v1.14 需求 2：本次触摸序列是否已进入"边缘调节"模式。
+             *
+             * 一旦进入就**独占**整条滑动序列 —— 再不判断换台 / 换线路，
+             * 否则手指从左边缘往上滑到中途会突然换个频道。
+             */
+            private var edgeZone: EdgeZone? = null
+
             override fun onDown(e: MotionEvent): Boolean {
                 swipeConsumed = false
+                edgeZone = null
                 return false
             }
 
@@ -1616,7 +1949,28 @@ class MainActivity : AppCompatActivity() {
              * 就立即认定，不等抬手。
              */
             override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
-                if (swipeConsumed || e1 == null) return false
+                if (e1 == null) return false
+
+                // ------------------------------------------------------------------
+                // v1.14 需求 2：左右 1/4 区域内的竖向滑动 = 调亮度 / 调音量。
+                //
+                // 注意这里的 `dy` 是**本次事件的增量**（不是累计值），
+                // 所以调节是连续的：手指一直滑，值就一直跟着变。
+                // 这与下面的换台判定刚好相反 —— 换台走的是"累计位移到阈值只认一次"。
+                // ------------------------------------------------------------------
+                if (edgeZone == null && !swipeConsumed) {
+                    val zone = edgeZoneOf(e1.x)
+                    val ay = Math.abs(e2.y - e1.y)
+                    val ax = Math.abs(e2.x - e1.x)
+                    if (zone != null && ay >= EDGE_MIN_PX && ay > ax) edgeZone = zone
+                }
+                val zone = edgeZone
+                if (zone != null) {
+                    adjustEdgeBy(zone, dy)
+                    return false
+                }
+                if (swipeConsumed) return false
+
                 val adx = Math.abs(e2.x - e1.x)
                 val ady = Math.abs(e2.y - e1.y)
                 if (adx >= SWIPE_MIN_PX || ady >= SWIPE_MIN_PX) {
@@ -1628,6 +1982,8 @@ class MainActivity : AppCompatActivity() {
 
             override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
                 if (e1 == null) return false
+                // v1.14 需求 2：边缘调节抬手时也会走到这里，不能顺手换个台/换条线路。
+                if (edgeZone != null) return true
                 onScreenSwipe(e1.x, e1.y, e2.x - e1.x, e2.y - e1.y)
                 return true
             }
@@ -1719,6 +2075,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun onScreenTap(x: Float, y: Float) {
         if (!::panel.isInitialized) return          // 判据 11-2：崩溃报告屏下视图树未建
+        // v1.14 需求 3：提示窗在屏时触摸一律不穿透。
+        // （sourceLoading 已经全局兜底，这里是双保险 —— 提示窗收起的那一帧它就已不可见。）
+        if (loadingTip?.visibility == View.VISIBLE) return
+        // v1.14 需求 3：EPG 弹层在屏时同样不穿透。
+        // 原来这一层的判断是**漏的** —— 长按左键唤出节目单后点一下画面，
+        // 会顺手把背后的三段式面板也唤出来（「面板唤出 → 光标回到分组栏第 3 项」）。
+        if (::epgPanel.isInitialized && epgPanel.isOpen) return
         if (dialogView != null) return              // 自绘对话框开着时，画面点击不生效
         if (agreementGate != null) return           // v1.7：《使用须知》没同意前点击不穿透
         // v1.9：播放控制 / 多线路在屏时，画面点击一律不穿透给下层。
@@ -2560,15 +2923,30 @@ class MainActivity : AppCompatActivity() {
     // ---------------- 数据 ----------------
 
     /**
-     * v1.7 换源提醒：[label] 非空 = 用户手动切换订阅源 ——
-     * 底部先挂粘性的「正在切换源：XX …」，加载完换成「已切换：XX（N 个频道）」，
-     * 失败则给出原因（保持粘性）。启动时传 null，维持原来的「正在载入直播源…」。
+     * 加载直播源。
+     *
+     * v1.14 需求 1（用户）把提示方式整体换掉：
+     *   旧：右下角底栏一条粘性状态「正在载入直播源…」—— 用户明确说「右下角先不要有弹窗」
+     *   新：屏幕**中下方**的白色提示窗 + 转圈（[showLoadingTip]）
+     *
+     * @param label       非空 = 用户手动切换订阅源 → 铺全屏黑并收起所有其他框；
+     *                    空 = 启动加载 → 不铺黑（开机时画面本来就是黑的）。
+     * @param fallbackUrl 切换失败时回退到哪个源（用户要求"退回到原来的直播订阅链接"）。
+     *                    启动加载没有"上一个源"，传 null。
      */
-    private fun loadSource(url: String, label: String? = null) {
-        showBottomStatus(
-            if (label != null) "正在切换源：$label …" else "正在载入直播源…",
-            sticky = true,
+    private fun loadSource(url: String, label: String? = null, fallbackUrl: String? = null) {
+        val switching = label != null
+        sourceLoading = true
+        // 用户要求：加载期间右下角不要有弹窗。底栏与左下临时信息块一并收掉，
+        // 之后由 refreshBottomVisibility() 里的 sourceLoading 判断保持隐藏。
+        if (::bottomBar.isInitialized) bottomBar.visibility = View.GONE
+        if (::tempInfoBar.isInitialized) tempInfoBar.visibility = View.GONE
+        if (switching) hideAllFramesForSourceSwitch()
+        showLoadingTip(
+            if (switching) "正在切换直播源：$label …" else "正在加载直播源…",
+            opaque = switching,
         )
+
         Thread {
             val fetched = fetchSourceBody(url)
             val body = fetched.first
@@ -2589,13 +2967,14 @@ class MainActivity : AppCompatActivity() {
                     // 原来这里无条件 renderAll(DEMO_M3U)，用户看到的现象就是
                     // 「点开别的订阅源 → 加载不出来 → 自己变成了测试源界面」，
                     // 而且当前正在看的频道列表被无声替换掉，完全没有可诊断的信息。
-                    // 现在：解析失败就**保留原列表**，把真实原因挂在底栏（粘性，不自动消失）。
                     val reason = err ?: "内容不是有效的直播源格式（既无 #EXTINF 也无 #genre#）"
-                    showBottomStatus(
-                        if (label != null) "切换源失败：$reason" else "源加载失败：$reason",
-                        sticky = true,
-                    )
                     android.util.Log.w("源加载", "加载失败，保留原列表：$reason")
+
+                    // v1.14 需求 1：在**原来白色提示窗的位置**显示红色提示。
+                    showLoadingErrorTip(
+                        if (switching) "切换直播源失败：$label\n$reason"
+                        else "加载直播源失败：$reason"
+                    )
 
                     // 只有「一个频道都没有」时才用演示源兜底，保证首次启动/断网时界面不是空的。
                     if (groupList.flatChannels().isEmpty()) {
@@ -2603,23 +2982,42 @@ class MainActivity : AppCompatActivity() {
                         renderAll(ChannelParser.toGroupList(ChannelParser.parse(DEMO_M3U)))
                         fetchEpg()
                     }
+
+                    // v1.14 需求 1：红色提示停留约 3 秒 → 回退到切换前的订阅源并正常播放。
+                    handler.postDelayed({
+                        hideLoadingTip()
+                        sourceLoading = false
+                        if (switching && !fallbackUrl.isNullOrBlank() && fallbackUrl != url) {
+                            UiLog.i("界面", "切换源失败 → 回退到上一个订阅源：$fallbackUrl")
+                            Prefs.setCurrentSource(this, fallbackUrl)
+                            loadSource(fallbackUrl)
+                        } else {
+                            refreshBottomVisibility()
+                        }
+                    }, LOAD_FAIL_FALLBACK_MS)
                 } else {
+                    hideLoadingTip()
+                    sourceLoading = false
                     renderAll(ChannelParser.toGroupList(parsed))
-                    // v1.7：切换成功给一个非粘性的完成提示（1.5 秒后自动收）；
-                    // 启动载入没有完成提示，但要把"正在载入…"的粘性状态解除，
-                    // 否则节目信息被它顶住、底栏永远显示「正在载入直播源…」。
-                    if (label != null) {
-                        showBottomStatus("已切换：$label（共 ${groupList.flatChannels().size} 个频道）")
-                    } else {
-                        bottomStatusSticky = false
-                        bottomStatusUntil = 0L
-                        refreshBottomVisibility()
-                    }
+
                     // 问题 6：源就位后回到上次频道。**恢复成功才置位** ——
                     // 首次加载失败时不会把机会用掉，等真正加载到目标源时还能再试。
                     if (!lastChannelRestored && restoreLastChannel()) lastChannelRestored = true
                     // M7：源就位后才拉节目单（要用频道名做过滤）
                     fetchEpg()
+
+                    // v1.14 需求 1：加载成功 → 提示窗消失，改由右下角信息框显示当前节目详情。
+                    // 底栏原本只在"面板在屏 / 有状态消息"时显示，刚加载完两者都不成立，
+                    // 所以用 bottomHoldUntil 主动把它撑出来一段（用户要求"换底部详细信息的框弹出"）。
+                    bottomStatusSticky = false
+                    bottomStatusUntil = 0L
+                    bottomHoldUntil = SystemClock.uptimeMillis() + SOURCE_READY_INFO_MS
+                    handler.removeCallbacks(bottomHoldExpire)
+                    handler.postDelayed(bottomHoldExpire, SOURCE_READY_INFO_MS + 80L)
+                    if (switching) {
+                        UiLog.i("界面", "已切换：$label（共 ${groupList.flatChannels().size} 个频道）")
+                    }
+                    refreshBottomVisibility()
                 }
             }
         }.start()
@@ -2736,10 +3134,19 @@ class MainActivity : AppCompatActivity() {
         runCatching {
             val url = Prefs.currentSourceUrl(this)
             if (url.isNotBlank()) {
-                val names = list.groups.map { it.name }
+                val fresh = list.groups.map { it.name }
                     .filterNot { it.contains("更新时间") }   // 伪分组不入名单
                 val map = Prefs.iptvSourceGroupNamesMap(this)
-                if (map[url] != names) Prefs.setIptvSourceGroupNamesMap(this, map + (url to names))
+                // ⚠️ v1.14 需求 5：改成**并集**，不再整体覆盖。
+                //
+                // 原先这里是 `map + (url to fresh)`。看着没问题，但 renderAll 还会被
+                // `currentSourceGroupRows()` 的切换回调以 `renderAll(groupList)` 调用，
+                // 而入参 `groupList` **已经按隐藏名单过滤过** —— 于是每隐藏一个分组，
+                // 缓存名单就少掉一个，最终「全部分组管理」里该源只剩下零星几项，
+                // 用户看到的现象就是"每个源只有一个隐藏的机会"、"分组像被删掉了"。
+                val known = map[url].orEmpty()
+                val merged = known + fresh.filterNot { it in known }
+                if (map[url] != merged) Prefs.setIptvSourceGroupNamesMap(this, map + (url to merged))
             }
         }
 
@@ -2785,8 +3192,6 @@ class MainActivity : AppCompatActivity() {
         // 判据 12：重建会销毁所有行（含正在聚焦的那一行），焦点搬回原项，否则会被丢回「换源」。
         if (hadNavFocus) navColumn.getChildAt(navIdx)?.requestFocus()
     }
-
-
 
     /** 上次崩溃过就把堆栈显示出来 —— 老设备接不了 adb，只能靠截图定位。 */
     private fun showCrashReportIfAny(): Boolean {
@@ -2983,6 +3388,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun switchSource(src: IptvSource) {
+        // v1.14 需求 1：记下切换**之前**的源 —— 新源加载失败时要回退到它继续正常播放
+        // （用户原话：「退回到原来的直播订阅链接正常播放那个订阅链接的内容」）。
+        val previous = Prefs.currentSourceUrl(this)
         Prefs.setCurrentSource(this, src.url)
         currentChannel = null
         // 问题 6：手动换源时把"上次频道序号"重置为 0 —— 与原版
@@ -2990,9 +3398,7 @@ class MainActivity : AppCompatActivity() {
         // 否则新源会拿旧源的序号去跳，跳到风马牛不相及的频道。
         Prefs.setIptvLastChannelIdx(this, 0)
         lastChannelRestored = false
-        // v1.7（用户要求）：切源时在底部给一个明确的「正在切换」提醒（粘性，
-        // 直到加载成功换成「已切换」或失败给出原因，不会 1.5 秒就闪没了）。
-        loadSource(src.url, src.name)
+        loadSource(src.url, src.name, fallbackUrl = previous)
     }
 
     private fun confirmRemoveSource(src: IptvSource) {
@@ -3047,6 +3453,14 @@ class MainActivity : AppCompatActivity() {
             val built = AppDialog.buildInput(
                 this, "添加自定义节目单", "名称，例如：备用节目单", "XMLTV / e.xml 地址",
                 okLabel = "保存",
+                // v1.14 需求 4：节目单地址也支持手机扫码填写
+                qrPush = AppDialog.QrPush(
+                    specs = listOf(
+                        AppDialog.QrPush.FieldSpec("name", "名称（可留空）", "例如：备用节目单", 0),
+                        AppDialog.QrPush.FieldSpec("url", "节目单地址", "XMLTV / e.xml 地址", 1),
+                    ),
+                    onReceive = { v -> UiLog.i("界面", "扫码推送 → 添加节目单：${v["url"].orEmpty()}") },
+                ),
                 onCancel = { closeAppDialog() },
                 onOk = { name, url ->
                     closeAppDialog()
@@ -3312,6 +3726,11 @@ class MainActivity : AppCompatActivity() {
         val built = AppDialog.buildSingleInput(
             this, "播放器自定义UA", "留空恢复默认 UA",
             initial = Prefs.videoPlayerUserAgent(this),
+            // v1.14 需求 4：UA 串又长又难敲，手机扫码贴过来最省事
+            qrPush = AppDialog.QrPush(
+                specs = listOf(AppDialog.QrPush.FieldSpec("value", "自定义 UA", "留空恢复默认 UA", 0)),
+                onReceive = { UiLog.i("界面", "扫码推送 → 播放器UA（${it["value"]?.length ?: 0} 字符）") },
+            ),
             onCancel = { closeAppDialog() },
             onOk = { value ->
                 closeAppDialog()
@@ -3339,6 +3758,14 @@ class MainActivity : AppCompatActivity() {
         // 判据「这风格没统一」（真机截图：白底灰框的系统对话框，与深色 UI 冲突）。
         val built = AppDialog.buildInput(
             this, "添加直播源", "名称，例如：备用源", "M3U / TXT 地址", okLabel = "添加",
+            // v1.14 需求 4：手机扫码隔空填写（声明字段 ↔ 输入框的对应关系即可）
+            qrPush = AppDialog.QrPush(
+                specs = listOf(
+                    AppDialog.QrPush.FieldSpec("name", "名称（可留空）", "例如：备用源", 0),
+                    AppDialog.QrPush.FieldSpec("url", "直播源地址", "M3U / TXT 地址", 1),
+                ),
+                onReceive = { v -> UiLog.i("界面", "扫码推送 → 添加直播源：${v["url"].orEmpty()}") },
+            ),
             onCancel = { closeAppDialog() },
             onOk = { name, url ->
                 if (url.isBlank()) {
@@ -3568,8 +3995,9 @@ class MainActivity : AppCompatActivity() {
         view.onClose = { closeGroupManage() }
         view.show(
             title = if (counterpart) "全部分组管理" else "频道分组管理",
-            hint = if (counterpart) "统一管理所有订阅源的分组显示、隐藏（切换源、重启后保持）· 确认键切换"
-            else "管理当前订阅源的分组显示、隐藏状态 · 确认键切换",
+            // v1.14 需求 5：文案跟着"开关"语义改写（原来写的是"确认键切换"，没说清开关方向）。
+            hint = if (counterpart) "统一管理所有订阅源的分组 · 开关「开」= 显示、「关」= 隐藏 · 切换源/重启后保持"
+            else "管理当前订阅源的分组 · 开关「开」= 显示、「关」= 隐藏 · 切换源/重启后保持",
             provider = { if (counterpart) allSourceGroupRows() else currentSourceGroupRows() },
         )
         rootView.addView(view, FrameLayout.LayoutParams(
@@ -3579,6 +4007,9 @@ class MainActivity : AppCompatActivity() {
         // v1.13 需求 2：分组管理此前也没有超时，补上。
         groupManageAutoClose.cancel()
         groupManageAutoClose.active()
+        // v1.14 需求 6：把还没加载过的订阅源在后台补上分组名（用户要求"不用先手动加载"）。
+        // 只在「全部分组管理」里做 —— 「频道分组管理」管的是当前源，它必然已经加载过。
+        if (counterpart) prefetchMissingGroupNames()
     }
 
     private fun closeGroupManage() {
@@ -3589,15 +4020,28 @@ class MainActivity : AppCompatActivity() {
         UiLog.i("设置", "分组管理已关闭")
     }
 
-    /** 「频道分组管理」的行：只列当前订阅源的分组。 */
+    /**
+     * 「频道分组管理」的行：只列**当前订阅源**的分组。
+     *
+     * v1.14 需求 5（用户）两处重写：
+     *  ① 数据源从 `groupList.groups` 换成 `iptvSourceGroupNamesMap` 里缓存的**全量**名单。
+     *     前者是 [renderAll] 过滤后的结果 —— 隐藏一个分组后它就从列表里消失了，
+     *     用户看到的现象是「分组像被删掉了」「每个源只能隐藏一个」。
+     *  ② 点击回调**每次都重新读**当前隐藏名单。原实现把读到的 Set 快照捕获进闭包，
+     *     连点两下时第二下用旧快照重算，把第一下的结果覆盖掉。
+     */
     private fun currentSourceGroupRows(): List<GroupManageView.Row> {
+        val url = Prefs.currentSourceUrl(this)
+        val names = Prefs.iptvSourceGroupNamesMap(this)[url].orEmpty()
+            .ifEmpty { groupList.groups.map { it.name } }
         val hidden = Prefs.iptvChannelGroupHiddenList(this)
-        return groupList.groups.map { g ->
-            GroupManageView.Row.Toggle(g.name, g.name in hidden) {
-                Prefs.setIptvChannelGroupHiddenList(this, toggleName(hidden, g.name))
+        return names.map { name ->
+            GroupManageView.Row.Toggle(name, name in hidden) {
+                val now = toggleName(Prefs.iptvChannelGroupHiddenList(this), name)
+                Prefs.setIptvChannelGroupHiddenList(this, now)
                 groupManageView?.render()
                 renderAll(groupList)          // 分组显隐立即生效
-                UiLog.i("设置", "分组显隐：${g.name} → ${if (g.name in hidden) "显示" else "隐藏"}")
+                UiLog.i("设置", "分组显隐：$name → ${if (name in now) "隐藏" else "显示"}")
             }
         }
     }
@@ -3605,27 +4049,99 @@ class MainActivity : AppCompatActivity() {
     /** 「全部分组管理」的行：按订阅源分段。 */
     private fun allSourceGroupRows(): List<GroupManageView.Row> {
         val namesMap = Prefs.iptvSourceGroupNamesMap(this)
-        val hiddenMap = Prefs.iptvSourceGroupHiddenMap(this)
         val rows = ArrayList<GroupManageView.Row>()
         Prefs.sources(this).forEach { src ->
             rows.add(GroupManageView.Row.Header("${src.name}　${src.url}"))
             val groups = namesMap[src.url].orEmpty()
             if (groups.isEmpty()) {
-                rows.add(GroupManageView.Row.Toggle("（尚未加载过该订阅源，打开一次后可管理分组）", true) {})
+                // v1.14 需求 6：正常路径下这个占位很快就会消失 ——
+                // 打开抽屉时会 [prefetchMissingGroupNames] 后台抓一次，拿到分组名后自动重绘；
+                // 抓不到（断网 / 不是直播源格式）则换成明确的失败文案，不再永远"正在获取"。
+                rows.add(GroupManageView.Row.Note(
+                    if (src.url in prefetchFailedUrls) "暂时获取不到该订阅源的分组（网络或格式问题），可稍后重试"
+                    else "正在获取该订阅源的分组…"
+                ))
             } else {
-                val hidden = hiddenMap[src.url].orEmpty().toSet()
+                val hidden = Prefs.iptvSourceGroupHiddenMap(this)[src.url].orEmpty().toSet()
                 groups.forEach { name ->
                     rows.add(GroupManageView.Row.Toggle(name, name in hidden) {
-                        val now = toggleName(hidden, name)
+                        // v1.14 需求 5：每次重新读，不要用闭包外的快照。
+                        val mine = Prefs.iptvSourceGroupHiddenMap(this)[src.url].orEmpty().toSet()
+                        val now = toggleName(mine, name)
                         Prefs.setIptvSourceGroupHiddenMap(
-                            this, hiddenMap + (src.url to now.toList()))
+                            this, Prefs.iptvSourceGroupHiddenMap(this) + (src.url to now.toList()))
                         groupManageView?.render()
                         if (src.url == Prefs.currentSourceUrl(this)) renderAll(groupList)
+                        UiLog.i(
+                            "设置",
+                            "分组显隐：${src.name} / $name → ${if (name in now) "隐藏" else "显示"}"
+                        )
                     })
                 }
             }
         }
         return rows
+    }
+
+    /**
+     * v1.14 需求 6（用户原话）：「不同订阅源必须要第一次点加载了才能分组管理吗？
+     * 可以的话优化下，不需要第一次手动点加载就可以分组管理」。
+     *
+     * 分组名原先只在 [renderAll] 里写入 —— 也就是**必须先切到那个源**才有名单，
+     * 「全部分组管理」里其它源一律显示「尚未加载过该订阅源」。
+     *
+     * 现在打开抽屉时，对缺失名单的源各抓一次（走与换源同一条 [fetchSourceBody] 链路，
+     * 共享 TLS 配置 / 超时 / 重试 / 缓存），解析出分组名写回缓存后重绘抽屉。
+     * 只在打开抽屉时触发一次，不做常驻轮询。
+     */
+    private fun prefetchMissingGroupNames() {
+        val namesMap = Prefs.iptvSourceGroupNamesMap(this)
+        val missing = Prefs.sources(this).filter { namesMap[it.url].isNullOrEmpty() }
+        if (missing.isEmpty()) return
+        UiLog.i("设置", "分组管理：后台预取 ${missing.size} 个订阅源的分组名")
+        prefetchFailedUrls.clear()
+
+        Thread {
+            var got = false
+            missing.forEach { src ->
+                val fetched = fetchSourceBody(src.url)
+                val body = fetched.first
+                val err = fetched.second
+                if (body.contains("#EXTINF") || body.contains("#genre#")) {
+                    val names = ChannelParser.toGroupList(ChannelParser.parse(body))
+                        .groups.map { it.name }
+                        .filterNot { it.contains("更新时间") }
+                    if (names.isNotEmpty()) {
+                        got = true
+                        android.util.Log.i("设置", "预取分组名 ${src.name} → ${names.size} 个")
+                        handler.post { applyPrefetchedGroupNames(src.url, names) }
+                    } else {
+                        prefetchFailedUrls.add(src.url)
+                    }
+                } else {
+                    prefetchFailedUrls.add(src.url)
+                    android.util.Log.w(
+                        "设置", "预取分组名失败 ${src.name}：${err ?: "内容不是有效的直播源格式"}"
+                    )
+                }
+            }
+            if (!got) UiLog.i("设置", "分组管理：没有预取到新的分组名")
+            // 有失败项时重绘一次，把「正在获取…」占位换成明确的失败文案
+            if (prefetchFailedUrls.isNotEmpty()) handler.post { groupManageView?.render() }
+        }.start()
+    }
+
+    /** 本次预取抓不到分组名的订阅源（仅用于把占位行换成失败文案，随每次预取清空）。 */
+    private val prefetchFailedUrls = mutableSetOf<String>()
+
+    /** 预取结果回填（主线程）。只补不删 —— 与 [renderAll] 里的并集策略一致。 */
+    private fun applyPrefetchedGroupNames(url: String, names: List<String>) {
+        val map = Prefs.iptvSourceGroupNamesMap(this)
+        val known = map[url].orEmpty()
+        val merged = known + names.filterNot { it in known }
+        if (merged == known) return
+        Prefs.setIptvSourceGroupNamesMap(this, map + (url to merged))
+        groupManageView?.render()
     }
 
     private fun toggleName(set: Set<String>, name: String): Set<String> =
@@ -3870,7 +4386,6 @@ class MainActivity : AppCompatActivity() {
             }
         }.onFailure { showBottomStatus("无法启动 ${app.label}") }
     }
-
 
     /**
      * 重置第三列（换源/换分组时）：回到竖排提示条，等节目单渲染。

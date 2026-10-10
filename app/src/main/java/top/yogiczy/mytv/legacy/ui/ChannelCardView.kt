@@ -49,8 +49,27 @@ class ChannelCardView(
     private val bgNormal: GradientDrawable =
         UiKit.rounded(UiKit.withAlpha(Palette.surfaceContainer(context), 0.92f), 8f, context)
     private val bgFocused: GradientDrawable = UiKit.rounded(Palette.onSurface(context), 8f, context)
+
+    /**
+     * 「正在播放」那一行的底色。
+     *
+     * ---------------------------------------------------------------------------
+     * v1.14 需求 7（用户原话）：
+     *   「这个当前播放的节目位置的透明度太透了，可以改成比没选中时候还加重 10% 的透明度」
+     *
+     * 原来这里是 `surfaceVariant @ 0.55f` —— **比未选中项的 `surfaceContainer @ 0.92f` 还透**，
+     * 叠在视频画面上几乎看不出边界。用户截图里「湖南卫视」那一行就是这个状态：
+     * 明明是当前正在播的台，观感却像"没被选中"。
+     *
+     * 现在按字面加重 10 个百分点：0.92 → 1.00（封顶），并换成更亮的 `surfaceContainerHigh`
+     * 作底，这样它比普通行**更实也更亮**，一眼能看出"这台正在播"。
+     *
+     * ⚠️ 与焦点态（`bgFocused` = 纯白底 + 黑字反色）刻意保持区分：
+     *    焦点是「你现在指着哪一行」，正在播放是「你正在看哪个台」，两者可以不是同一行。
+     * ---------------------------------------------------------------------------
+     */
     private val bgCurrent: GradientDrawable =
-        UiKit.rounded(UiKit.withAlpha(Palette.surfaceVariant(context), 0.55f), 8f, context)
+        UiKit.rounded(Palette.surfaceContainerHigh(context), 8f, context)
 
     var channel: Channel? = null
         private set
@@ -183,6 +202,19 @@ class ChannelCardView(
         if (bitmap == null) return
         logo.setImageDrawable(BitmapDrawable(resources, bitmap))
         logo.visibility = VISIBLE
+    }
+
+    /**
+     * 就地更新「正在播放」标记（v1.14 需求 7）。
+     *
+     * 面板收起期间用户可能用上下键 / 数字键换过台，重开面板时不能靠整列重建
+     * （会丢焦点与滚动位置），所以由 [top.yogiczy.mytv.legacy.ui.panel.ChannelColumnView]
+     * 对可见卡片逐个调这里。
+     */
+    fun setCurrent(current: Boolean) {
+        if (isCurrent == current) return
+        isCurrent = current
+        applyStyle(isFocused)
     }
 
     private fun applyStyle(focused: Boolean) {
