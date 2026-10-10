@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -259,6 +260,56 @@ class SettingsView(context: Context) : LinearLayout(context) {
         return contentColumn.indexOfChild(f)
     }
 
+    /** 当前焦点落在左栏第几个分类（不在左栏返回 -1）。v1.11 新增，见 [renderContentOnce]。 */
+    private fun focusedCategoryIndex(): Int {
+        var f: View = catColumn.findFocus() ?: return -1
+        while (f.parent !== catColumn) {
+            f = f.parent as? View ?: return -1
+        }
+        return catColumn.indexOfChild(f)
+    }
+
+    /** 把焦点送回右栏第 [idx] 行（越界就往前退，直到有一个能取焦）。 */
+    private fun requestContentFocus(idx: Int) {
+        if (contentColumn.childCount == 0) return
+        var i = idx.coerceAtMost(contentColumn.childCount - 1)
+        while (i >= 0) {
+            if (contentColumn.getChildAt(i).requestFocus()) return
+            i--
+        }
+    }
+
+    /**
+     * v1.11（用户需求 2）：记下**手指刚落在右栏哪一行**。
+     *
+     * 为什么在 `dispatchTouchEvent` 上做、而不是给每一行挂 `setOnTouchListener`：
+     * 行内右侧那个 `SwitchCompat` 会**自己消费**触摸事件，父行的 onTouch 根本不会回调 ——
+     * 而"直接点开关"恰恰是最容易把焦点丢掉的场景（行本身没拿到焦点）。
+     * 这里用屏幕坐标与每行的 `getLocationOnScreen` 做命中判定，跟谁消费事件无关。
+     */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            rememberContentRowAt(ev.rawX, ev.rawY)
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
+    private fun rememberContentRowAt(rawX: Float, rawY: Float) {
+        if (contentColumn.childCount == 0) return
+        val loc = IntArray(2)
+        for (i in 0 until contentColumn.childCount) {
+            val v = contentColumn.getChildAt(i)
+            if (v.visibility != VISIBLE || v.height <= 0) continue
+            v.getLocationOnScreen(loc)
+            if (rawY >= loc[1] && rawY <= loc[1] + v.height &&
+                rawX >= loc[0] && rawX <= loc[0] + v.width
+            ) {
+                lastContentIdx = i
+                return
+            }
+        }
+    }
+
     /** v1.9：上一次停留的右栏行号（打开子抽屉前记下，关掉抽屉后搬回去）。 */
     private var lastContentIdx = -1
 
@@ -288,7 +339,24 @@ class SettingsView(context: Context) : LinearLayout(context) {
 
     /** 按 [selected] 重建右栏（只由 [renderContent] 调用，保证不重入）。 */
     private fun renderContentOnce() {
-        val keepFocusIdx = focusedContentIndex()
+        // ------------------------------------------------------------------
+        // v1.11（用户需求 2）：重建后必须**停在原处**，不能跳回列表开头。
+        //
+        // 用户原话：「在设置列表里，当设置好某一项之后，老会跳到刚点开的时候（那一项）…
+        //            当设置好某一项后，停留到那一项就好。不要跳到开头那里，然后又要重新往下选按」。
+        //
+        // 为什么会跳回开头：`contentColumn.removeAllViews()` 会把**当前聚焦的那一行**从树里摘掉，
+        // 系统随即 `clearChildFocus → checkFocus()`，把焦点交给窗口里第一个可聚焦视图 ——
+        // 也就是**左栏第一个分类**「关于」。老代码只在「重建前焦点确实在右栏」时才搬回去
+        // （`keepFocusIdx >= 0`），于是"焦点本来就不在右栏"的时刻全都丢在开头：
+        //   · 触摸屏上直接点右侧开关 —— 点的是 SwitchCompat，行本身不一定拿到焦点；
+        //   · 刚进设置页、焦点还在左栏分类上时会话中的重建。
+        // 现在改成三段式恢复（见下方 finally 之后），并把"最后待过的右栏行号"在
+        // 焦点进入右栏、以及在右栏任意一行按下手指时都记下来。
+        // ------------------------------------------------------------------
+        val prevContentIdx = focusedContentIndex()
+        if (prevContentIdx >= 0) lastContentIdx = prevContentIdx
+        val prevCatIdx = focusedCategoryIndex()
         suppressCategoryFocus = true
         try {
             contentColumn.removeAllViews()
@@ -327,14 +395,19 @@ class SettingsView(context: Context) : LinearLayout(context) {
         } finally {
             suppressCategoryFocus = false
         }
-        // 焦点搬回右栏原下标：原来的焦点行已被移除，系统把焦点随手交给了左栏第一行，
-        // 不搬回来就会"内容还是这一栏、焦点却在左栏"。
-        if (keepFocusIdx >= 0 && contentColumn.childCount > 0) {
-            var i = keepFocusIdx.coerceAtMost(contentColumn.childCount - 1)
-            while (i >= 0) {
-                if (contentColumn.getChildAt(i).requestFocus()) break
-                i--
-            }
+        // 焦点搬回原处。顺序有讲究（v1.11）：
+        //  ① 重建前焦点在右栏 → 搬回原行（最常见，改完设置停留在该项）
+        //  ② 重建前焦点在左栏 → 搬回原分类（否则会被系统丢到「关于」）
+        //  ③ 重建前后哪都没焦点（触摸屏点开关）→ 用最近一次待过的右栏行兜底
+        when {
+            prevContentIdx >= 0 -> requestContentFocus(prevContentIdx)
+            prevCatIdx >= 0 -> catColumn.getChildAt(prevCatIdx)?.requestFocus()
+            lastContentIdx >= 0 -> requestContentFocus(lastContentIdx)
+        }
+        // 正常情况静默（重建很频繁，刷日志没意义）。只有"该回到右栏却回不去"时才记一条：
+        // 那正是用户反馈的「改完设置跳回开头」现象，真机上出问题能靠这一行定位。
+        if (prevContentIdx >= 0 && focusedContentIndex() < 0) {
+            UiLog.w("设置", "改完设置后焦点未回到右栏（原第 ${prevContentIdx + 1} 项）")
         }
     }
 

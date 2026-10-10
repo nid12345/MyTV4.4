@@ -81,7 +81,7 @@ class App : MultiDexApplication() {
  *    （M0 之前它就停在 "0.3.1-legacy"，比实际版本落后三个版本）。
  */
 object BuildConfigCompat {
-    const val VERSION_NAME = "1.10-legacy.15"
+    const val VERSION_NAME = "1.11-legacy.16"
 
     /**
      * 版本序号（单调递增）。
@@ -93,6 +93,7 @@ object BuildConfigCompat {
      * ⚠️ v1.9：14。与 gradle 的 versionCode 保持一致（v1.7 曾因为 11 vs 12 不一致，
      * 导致「检查更新」永远认为远端更新）。
      * ⚠️ v1.10：15。
+     * ⚠️ v1.11：16。
      */
-    const val VERSION_CODE = 15
+    const val VERSION_CODE = 16
 }

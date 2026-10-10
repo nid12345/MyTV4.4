@@ -728,6 +728,16 @@ class PlayerController(private val context: Context) {
         get() = runCatching { exoPlayer.isPlaying }.getOrDefault(false)
 
     /**
+     * v1.11（用户需求 4）：**播放意图**是不是"要播"。
+     *
+     * 与 [isPlaying] 的区别：缓冲/卡顿时 `isPlaying` 会是 false，但用户并没有要暂停。
+     * 判断"切后台该不该自动暂停"必须看这个 —— 否则正好在缓冲的那一瞬间切走，
+     * 就会漏掉暂停（而且回来也不会恢复）。
+     */
+    val wantsToPlay: Boolean
+        get() = runCatching { exoPlayer.playWhenReady }.getOrDefault(false)
+
+    /**
      * 是否直播。
      *
      * 判据用「时长未知」而不是 `isCurrentMediaItemLive`：
@@ -745,6 +755,19 @@ class PlayerController(private val context: Context) {
             .onFailure { UiLog.w(TAG, "seek 失败：${it.message}") }
     }
 
+    /**
+     * v1.11（用户需求 4）：跳回直播沿。
+     *
+     * 用处：从后台回来恢复播放时，直播流在暂停期间最多会往后攒满一个缓冲窗口
+     * （默认几十秒），直接 `play()` 会从几十秒前接着播。`seekToDefaultPosition()`
+     * 对直播窗口就是「最新位置」（ExoPlayer 按 `liveConfiguration.targetOffsetMs` 折算），
+     * 点播窗口则是回到片头 —— 所以**只对直播调用**，点播恢复时保持原进度。
+     */
+    fun seekToLiveEdge() {
+        runCatching { exoPlayer.seekToDefaultPosition() }
+            .onFailure { UiLog.w(TAG, "回直播沿失败：${it.message}") }
+    }
+
     /** 相对跳转（毫秒，负数=后退）。会夹到 `[0, duration]` 区间内。 */
     fun seekBy(deltaMs: Long) {
         val dur = duration
@@ -752,6 +775,31 @@ class PlayerController(private val context: Context) {
             if (t < 0L) 0L else if (dur > 0L && t > dur) dur else t
         }
         seekTo(target)
+    }
+
+    /**
+     * v1.11（用户需求 4）：切到后台时暂停。
+     *
+     * ⚠️ **必须同时撤掉卡死看门狗**，否则它会在后台照常开火：判定"卡死"后会
+     * 就地重建播放器、甚至降级换线路，而重建的最后一步是 `openUrl` —— 里面写死
+     * `playWhenReady = true`，于是画面在后台自己又播起来了，用户回到前台根本看不出"暂停"过。
+     */
+    fun pauseForBackground() {
+        cancelStallWatchdog()
+        pause()
+    }
+
+    /**
+     * v1.11（用户需求 4）：回到前台时恢复。
+     *
+     * 直播先跳回直播沿再播 —— 暂停期间流还在往前走，直接 `play()` 会从暂停点接着播，
+     * 落后实时画面一大截。点播不动进度（用户回来就是接着看的）。
+     * 看门狗重新布防：已经 READY 时它到点会自己空跑返回，不需要额外判断。
+     */
+    fun resumeFromBackground() {
+        if (isLive) seekToLiveEdge()
+        play()
+        armStallWatchdog()
     }
 
     fun release() {

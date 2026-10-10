@@ -21,11 +21,14 @@ android {
         // v1.10：投屏一次点击即选中、成功后才关抽屉并给出成败反馈；
         //        左侧三段式面板与长按快捷菜单互斥；投屏抽屉在屏时不再误唤面板；
         //        三个底部抽屉（投屏 / 节目单来源 / 分组管理）的遮罩点击不再吞掉列表行的 onClick。
+        // v1.11：选台面板取消定时自动隐藏（只在选台 / 返回 / 点空白时收起）；
+        //        设置页改完某项后焦点停在原处不再跳回列表开头；
+        //        检查更新不再残留底部粘性提示，更新下载改为并发探测镜像线路（国内网络可下）。
         // ⚠️ 与 App.kt 的 BuildConfigCompat 必须一致：
         //     versionCode ↔ VERSION_CODE（升级通道用它比大小）
         //     versionName ↔ VERSION_NAME
-        versionCode = 15
-        versionName = "1.10-legacy.15"
+        versionCode = 16
+        versionName = "1.11-legacy.16"
         vectorDrawables { useSupportLibrary = true }
         // minSdk < 21 时 core library desugaring 强制要求 multidex
         multiDexEnabled = true

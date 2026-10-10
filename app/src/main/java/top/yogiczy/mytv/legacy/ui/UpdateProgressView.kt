@@ -141,6 +141,20 @@ class UpdateProgressView(context: Context) : FrameLayout(context) {
         }
     }
 
+    /**
+     * v1.11：**还没有任何字节**时的状态（线路探测 / 建连阶段）。
+     *
+     * 用户原话里有「转圈加载中」的抱怨 —— 一根停在 0% 不动的进度条最容易被读成"卡死了"。
+     * 探测所有下载线路要 1~9 秒（最坏 12 秒），这段用**滚动条**表示"确实在动"，
+     * 等到第一个字节到达，[setProgress] 会把它切回真实百分比。
+     */
+    fun setConnecting(hint: String) {
+        bar.isIndeterminate = true
+        percentText.text = "—"
+        statusText.text = hint
+        sizeText.text = ""
+    }
+
     /** 下载完成：状态改为完成，按钮变「安装」。 */
     fun setFinished(fileName: String) {
         bar.progress = 100

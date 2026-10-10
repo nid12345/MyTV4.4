@@ -1481,3 +1481,164 @@ v1.9 的 6 项与 v1.10 的 3 项**合并为一次发布**（v1.9 只做了实�
 - `dist/MyTV4.4-v1.10-legacy15.apk`（release 10,329,150 B，MD5 `2ebd2ecb0c527b5c610ca4166368d03d`）
 - `dist/MyTV4.4-v1.10-legacy15-debug.apk`（debug）
 - `update/version.json` → v1.10 清单
+
+---
+
+# v1.11（versionCode 16 / `1.11-legacy.16`）
+
+用户四条，全部实机实测通过。
+
+## 需求 1：选台面板不再定时自动隐藏
+
+规则**只剩两条**（原版第三条「无操作超时自动隐藏」删除）：
+
+1. 面板内**选中频道** → 收起
+2. 按**返回键** → 收起
+3. 点**面板外空白** → 收起
+
+实现：删掉 `panelAutoClose`（`ScreenAutoClose`）字段、`resetAutoHide()`、以及全部
+`panelAutoClose.cancel()` / `resetAutoHide()` 调用点与注释。设置项「超时自动关闭界面」
+保留但收窄语义 —— 它继续作用于快捷菜单 / 投屏 / 节目单来源 / 多线路 / 播放控制五个弹层
+（那五个各用自己的 `ScreenAutoClose`，本来就不受面板影响），`SettingsCats.ui()` 的副标题同步改写。
+
+> 「超时自动关闭界面」为什么还留着：五个弹层确实需要超时（遥控器忘按返回是常态），
+> 只有选台面板被你明确要求"别自己收"。
+
+实测（`emulator-5554`）：
+
+| 路径 | 期望 | 实测 |
+|---|---|---|
+| 静置 25 秒（旧行为 15 秒自动收） | 面板保持 | ✔ 无 `hidePanel` 日志 |
+| 点面板外空白 (1100,660) | 收起 | ✔ `hidePanel 触发` |
+| 重新唤出后按返回键 | 收起 | ✔ `hidePanel 触发` |
+| 面板内选中频道 | 收起 | ✔ 换台 + 收起 |
+
+## 需求 2：设置页改完某项后焦点停在原处
+
+**根因**：`contentColumn.removeAllViews()` 会把当前聚焦的那一行从树里摘掉，系统随即
+`clearChildFocus → checkFocus()`，把焦点交给窗口里第一个可聚焦视图 —— 也就是**左栏第一个分类**。
+老代码只在「重建前焦点确实在右栏」时才搬回去（`keepFocusIdx >= 0`），于是"焦点本来就不在右栏"
+的时刻全都丢在开头：触摸屏直接点右侧开关（点的是 `SwitchCompat`，行本身不一定拿到焦点）、
+以及刚进设置页时的重建。
+
+**改法**：三段式恢复 + 触摸兜底。
+
+```kotlin
+// ① 重建前焦点在右栏 → 搬回原行（最常见）
+// ② 重建前焦点在左栏 → 搬回原分类（否则系统把它丢到「关于」）
+// ③ 哪都没焦点（触摸点开关）→ 用最近一次待过的右栏行兜底
+when {
+    prevContentIdx >= 0 -> requestContentFocus(prevContentIdx)
+    prevCatIdx     >= 0 -> catColumn.getChildAt(prevCatIdx)?.requestFocus()
+    lastContentIdx >= 0 -> requestContentFocus(lastContentIdx)
+}
+```
+
+`lastContentIdx` 在 `SettingsView.dispatchTouchEvent` 上按**屏幕坐标与每行
+`getLocationOnScreen` 做命中判定**记录 —— 不做在 `setOnTouchListener` 上，因为行内右侧那个
+`SwitchCompat` 会自己消费触摸事件、父行的 `onTouch` 根本不回调，而"直接点开关"恰恰最容易丢焦点。
+
+实测（`界面` 分类，7 行）：
+
+| 操作 | 重建后焦点 | 结论 |
+|---|---|---|
+| 触摸点第 1 行开关 (800,90) | `后(右=0)` | ✔ 停在原行 |
+| 触摸点第 2 行 (800,170) | `后(右=1)` | ✔ |
+| 触摸点第 3 行「台标显示」(800,250) | `后(右=2)` | ✔ |
+| 触摸点第 4 行 (800,330) | `后(右=3)` | ✔ |
+| 触摸点第 5 行 (800,450) | `后(右=4)` | ✔ |
+| 手指点行尾开关 (1150,250) | `后(右=2)` | ✔ 兜底生效 |
+| 遥控器：进右栏 → ↓×5 → 确认键 | `前(右=5) → 后(右=5)` | ✔ |
+| 再按一次确认键 | `前(右=5) → 后(右=5)` | ✔ 连按改的是同一项 |
+
+发版时把 `设置焦点` 诊断日志换成一条**只在异常时输出**的告警
+（`改完设置后焦点未回到右栏（原第 N 项）`）—— 重建很频繁，正常路径刷日志没意义。
+
+## 需求 3：更新不再残留底部提示 + 国内网络能下载
+
+### 3a 底部那条一直转圈的「正在检查更新…」
+
+`showBottomStatus(msg, sticky = true)` 的粘性提示**没有到期时间**，
+`refreshBottomVisibility()` 因此一直把底栏留在屏上；而 `checkForUpdate` 只在"失败"分支重写底栏，
+"成功"分支直接弹对话层、从没清过 → 底部永久挂着它；点「立即更新」后它还压在下载进度层下面同屏显示。
+
+改法三条：
+- `showBottomStatus` 新增 `durationMs` 参数（默认仍是 `BOTTOM_STATUS_MS`），失败提示改成 6 秒自动消失；
+- 新增 `clearBottomStatus()`，`checkForUpdate` 出结果后**先清再走分支**，`downloadUpdate` 开头也清一次；
+- 新增 `updateChecking` 防重入（连点不再并发发多次请求 + 多条提示）。
+
+### 3b 国内网络下载不到
+
+**根因**：老代码把 GitHub 直连排第一，连接超时 20s / 读超时 120s。国内直连
+`objects.githubusercontent.com` 常年不通 → 点完「立即更新」要干等两分钟才等到一句失败。
+
+**改法**：
+- `firstAlive()` —— 5 条镜像**并发**探测（`Range: bytes=0-1023` 只取 1KB，连接 4s / 读 5s，
+  总等待上限 12s，先响应者胜）；
+- 候选顺序改为「镜像 → jsDelivr → 直连 raw」；
+- 按实测重排镜像列表，移除 7 条已下线的；
+- `UpdateProgressView` 刚出现时显示「正在选择下载线路（国内镜像 / GitHub 直连）…」，
+  不再是一根停在 0% 的条（用户会读成"卡住了"）。
+
+实测（2026-10-10，2MB range，含 302 跟随）：
+
+| 线路 | 结果 | 速度 |
+|---|---|---|
+| `gh.llkk.cc` | 206 | 224 KB/s |
+| `gh-proxy.com` | 206 | 238 KB/s |
+| `ghfast.top` | 206 | 283 KB/s |
+| `edgeone.gh-proxy.com` | 206 | 346 KB/s |
+| `ghproxy.net` | 206 | 192 KB/s |
+| GitHub 直连 | 206 | 323 KB/s |
+
+清单三条线路均 200（`raw` 1.5s / `jsDelivr` 0.97s / `gh.llkk.cc` 1.0s）。
+
+> ⚠️ **本机测不出"真实国内直连"**：本机走 `utun` 隧道，直连 GitHub 也被代理转发，
+> 所以上表里"GitHub 直连"也是通的。镜像列表的价值在于**国内无代理时它们仍可用**，
+> 这一点只能靠列表本身都是国内可达的 ghproxy 系服务来保证。
+
+## 需求 4：切到其他应用自动暂停、回来恢复
+
+```kotlin
+override fun onPause()  { ... wasPlaying = player.wantsToPlay; if (wasPlaying) player.pauseForBackground() }
+override fun onResume() { ... if (!pausedByBackground) return; player.resumeFromBackground() }
+```
+
+三个细节，少一个都会出错：
+
+1. **判据用 `playWhenReady` 而不是 `isPlaying`** —— 流正在缓冲时 `isPlaying` 是 `false`，
+   但用户并不是要暂停；那一瞬间切走会漏掉暂停、且回来不恢复。
+2. **标志位** `pausedByBackground` —— 用户自己按过播放控制的暂停键时，切后台再回来必须**保持暂停**。
+3. **卡死看门狗要一起撤防** —— 它到点判定"卡死"后会就地重建播放器、甚至降级换线路，
+   而重建最后一步 `openUrl` 里写死 `playWhenReady = true`，**画面会在后台自己又播起来**。
+   恢复时重新布防（已 READY 时它到点自己空跑返回）。
+
+直播恢复时先 `seekToLiveEdge()`（= `exoPlayer.seekToDefaultPosition()`）——
+暂停期间流还在往前走，直接 `play()` 会从暂停点接着播、落后实时画面几十秒；点播保持原进度。
+
+实测：
+
+```
+I/MyTVLegacy: 播放：切到后台 → 自动暂停     ← KEYCODE_HOME 切到桌面
+I/MyTVLegacy: 播放：回到前台 → 恢复播放     ← am start 回到 MainActivity
+```
+
+## 本轮踩到的坑（复用结论）
+
+- **`adb logcat <过滤>` 后面接 `tail -N` 会把关键行截掉**：本轮探针日志明明打出来了，
+  却因为 `tail -6` 里后面还有 6 条别的日志而误判"探针没触发"，白查了一轮。
+  查探针要 `grep -a <关键字>` 单独取，别和别的过滤条件混着 tail。
+- **`screencap` 在这台模拟器上是坏的**：HOME 桌面截出来也是纯黑（5KB PNG）。
+  验证一律走 logcat，不要指望截图。`mCurrentFocus` / `mWakefulness=Awake` 都正常也没用。
+- **按键导航到设置页极不稳定**（`KEYCODE_MENU` + `DPAD_RIGHT`×6 + `DPAD_CENTER` 大概率跑偏成
+  "打开左侧面板"）。可靠做法：临时加一个 `am start --ez open_settings true` 的开机直开入口，
+  验完删掉。触摸路径反而很稳 —— 设置页里分类行在 x≈200、纵向 50px 一行
+  （关于 60 / 应用 110 / 直播源 160 / 节目单 260 / 界面 310 / 收藏 360），
+  右栏行在 x=800、纵向约 80px 一行。
+- `SettingsView` 的重建是**每秒 tick 比对签名**触发的，改完设置后最多等 1 秒才会看到重建日志。
+
+## 产物（v1.11，versionCode 16）
+
+- `dist/MyTV4.4-v1.11-legacy16.apk`（release 10,331,653 B，MD5 `36f75fc1a08c5243c0a5408c5356b058`，已签名）
+- `dist/MyTV4.4-v1.11-legacy16-debug.apk`（debug 17,106,627 B，MD5 `739150bb3d18790b5b23b510d8932bfd`）
+- `update/version.json` → v1.11 清单

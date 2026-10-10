@@ -58,11 +58,40 @@ object UpdateRepository {
      */
     const val LINE_AUTO = "auto"
 
-    /** ghproxy 类加速前缀（按可用性排序；国内直连 raw.githubusercontent 常年不稳）。 */
+    /**
+     * ghproxy 类加速前缀。
+     *
+     * v1.11（用户需求 3b「让国内网络能下载到」）**实测重排**。
+     * 本机 2MB range 实测（2026-10-10，含 302 跟随）：
+     * ```
+     *   gh.llkk.cc            2.5 MB/s   ✅ 留
+     *   gh-proxy.com          2.3 MB/s   ✅ 留
+     *   ghfast.top            1.8 MB/s   ✅ 留
+     *   edgeone.gh-proxy.com  1.5 MB/s   ✅ 留（Cloudflare EdgeOne，延迟稳）
+     *   ghproxy.net           0.26 MB/s  ✅ 留（慢但通）
+     *   gitproxy.click / github.moeyy.xyz / ghproxy.cc / ghp.ci / gh.xxooo.cf /
+     *   gh.jasonzeng.dev / hub.gitmirror.com                            ❌ 已下线，移除
+     * ```
+     * 注意：这里**只影响失败后的候选顺序**，真正决定用哪条的是 [firstAlive] 的并发探测。
+     */
     private val GH_PROXIES = listOf(
-        "https://ghfast.top/",
+        "https://gh.llkk.cc/",
         "https://gh-proxy.com/",
+        "https://ghfast.top/",
+        "https://edgeone.gh-proxy.com/",
+        "https://ghproxy.net/",
     )
+
+    /** 探测单条线路：只取前 1KB。国内直连 GitHub 会在这 9 秒内被快速判死，不再让用户干等。 */
+    private const val PROBE_CONNECT_MS = 4_000L
+    private const val PROBE_READ_MS = 5_000L
+
+    /** 并发探测的总等待上限（按最慢的一条算：4s 连接 + 5s 读 + 余量）。 */
+    private const val PROBE_TOTAL_WAIT_MS = 12_000L
+
+    /** 真正下载：连接 10s；读 20s —— 只要还有字节在流动就不会触发（慢速下载不受影响）。 */
+    private const val DL_CONNECT_MS = 10_000L
+    private const val DL_READ_MS = 20_000L
 
     /** 远端版本信息。 */
     data class UpdateInfo(
@@ -85,8 +114,9 @@ object UpdateRepository {
      */
     fun check(line: String): Pair<UpdateInfo?, String?> {
         val errors = ArrayList<String>()
-        for (url in manifestUrls(line)) {
-            val text = runCatching { Http.getText(url, client(15_000L, 20_000L)) }.getOrElse {
+        // v1.11：清单同样先并发探测挑线路，避免国内网络先卡一次 raw.githubusercontent 的超时。
+        for (url in orderByProbe(manifestUrls(line))) {
+            val text = runCatching { Http.getText(url, client(8_000L, 12_000L)) }.getOrElse {
                 errors.add("${hostOf(url)}：${it.message ?: it.javaClass.simpleName}")
                 Log.w(TAG, "清单获取失败 $url -> ${it.message}")
                 return@getOrElse ""
@@ -137,9 +167,14 @@ object UpdateRepository {
 
         val errors = ArrayList<String>()
         var cancelled = false
-        for (url in downloadUrls(info.url, line)) {
+        // v1.11（用户需求 3b）：先用并发探测挑出**当前网络下真正能用**的那条线路。
+        // 国内直连 GitHub Releases 的 `objects.githubusercontent.com` 常年不通，
+        // 老代码把直连排第一、连接超时 20s / 读超时 120s —— 用户点完「立即更新」
+        // 要干等两分钟才等到一句失败，体感就是"下载不了"。探测把这段等待压到 1~2 秒。
+        val candidates = orderByProbe(downloadUrls(info.url, line))
+        for (url in candidates) {
             val ok = runCatching {
-                Http.client(connectTimeoutMs = 20_000L, readTimeoutMs = 120_000L, userAgent = PlayerController.UA)
+                Http.client(connectTimeoutMs = DL_CONNECT_MS, readTimeoutMs = DL_READ_MS, userAgent = PlayerController.UA)
                     .newCall(Request.Builder().url(url).header("User-Agent", PlayerController.UA).build())
                     .execute().use { resp ->
                         if (!resp.isSuccessful) throw Http.HttpError("HTTP ${resp.code()} ${resp.message()}")
@@ -196,18 +231,86 @@ object UpdateRepository {
         return when (line) {
             "jsdelivr" -> listOf(jsdelivr, raw) + proxied
             "ghproxy" -> proxied + listOf(raw, jsdelivr)
-            else -> listOf(raw) + proxied + listOf(jsdelivr)
+            // v1.11：AUTO 的顺序改为「镜像 → jsDelivr → 直连 raw」。
+            // 国内 raw.githubusercontent.com 基本不通，原来把它排第一，
+            // 每次检查更新都要先耗掉一次连接超时。
+            else -> proxied + listOf(jsdelivr, raw)
         }
     }
 
-    /** 安装包 URL 候选。jsdelivr 不代理 Release 附件，所以只做 raw 与 ghproxy。 */
+    /**
+     * 安装包 URL 候选。
+     *
+     * v1.11：镜像排在 GitHub 直连**前面**。jsdelivr 不代理 Release 附件，所以只有镜像与直连两类。
+     * 真正决定用哪条的是 [firstAlive]（并发探测、先响应者胜），这里的顺序只是探测失败后的兜底顺序。
+     */
+    @Suppress("UNUSED_PARAMETER")
     private fun downloadUrls(url: String, line: String): List<String> {
         if (url.isBlank()) return emptyList()
-        val proxied = GH_PROXIES.map { it + url }
-        return when (line) {
-            "ghproxy" -> proxied + url
-            else -> listOf(url) + proxied
+        // 已无「线路偏好」之分（设置页那三档在 v1.8 就删了）：镜像优先、直连兜底。
+        return GH_PROXIES.map { it + url } + url
+    }
+
+    /**
+     * 并发探测所有候选线路，返回**最先响应**的那条（都没有则 null）。
+     *
+     * 为什么要并发而不是逐个串行：串行时"某条线路不通"要等满 connect 超时才轮到下一条，
+     * 5 条镜像最坏就是 5×4s=20s 的纯等待。并发后总耗时 = 最快那条的响应时间（通常 1~2s），
+     * 而且天然挑中了当前网络下最快能连上的那条。
+     *
+     * 探测本身只请求 `Range: bytes=0-1023`，1KB 就够判断"这条路能不能走通"。
+     */
+    private fun firstAlive(urls: List<String>): String? {
+        if (urls.isEmpty()) return null
+        val done = java.util.concurrent.CountDownLatch(1)
+        val winner = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        val threads = urls.map { u ->
+            Thread {
+                // 已经有赢家了就不必再探（count 降到 0）
+                if (done.count > 0L && probe(u) && winner.compareAndSet(null, u)) {
+                    done.countDown()
+                }
+            }.apply { isDaemon = true }
         }
+        threads.forEach { it.start() }
+        runCatching { done.await(PROBE_TOTAL_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS) }
+        return winner.get()
+    }
+
+    /**
+     * 单条线路探测：短超时取前 1KB，能拿到数据即算通。
+     *
+     * 403/404 也算"通"（说明链路通了、只是这个 URL 没内容），此时不该把它排到最前 —— 所以
+     * 非 2xx 一律判失败，让别的线路顶上。
+     */
+    private fun probe(url: String): Boolean = runCatching {
+        Http.client(PROBE_CONNECT_MS, PROBE_READ_MS, PlayerController.UA)
+            .newCall(
+                Request.Builder().url(url)
+                    .header("User-Agent", PlayerController.UA)
+                    .header("Range", "bytes=0-1023")
+                    .build()
+            ).execute().use { resp ->
+                if (!resp.isSuccessful) throw Http.HttpError("HTTP ${resp.code()}")
+                val body = resp.body() ?: throw Http.HttpError("响应为空")
+                val n = body.byteStream().read(ByteArray(16))
+                if (n > 0) true else body.contentLength() > 0L
+            }
+    }.getOrElse {
+        Log.w(TAG, "探测失败 ${hostOf(url)} -> ${it.message ?: it.javaClass.simpleName}")
+        false
+    }
+
+    /**
+     * 把探测到的最优线路排到最前，其余保持原顺序作为兜底。
+     *
+     * 探测**全军覆没**时原样返回：真正的下载循环超时更长（10s/20s），
+     * 能接住"探测被误杀、实际能下"的情况，不至于直接判定失败。
+     */
+    private fun orderByProbe(urls: List<String>): List<String> {
+        val best = firstAlive(urls) ?: return urls
+        Log.i(TAG, "线路探测：优先使用 ${hostOf(best)}")
+        return listOf(best) + urls.filter { it != best }
     }
 
     private fun hostOf(url: String): String =

@@ -245,16 +245,22 @@ class MainActivity : AppCompatActivity() {
      */
     private lateinit var quickOp: QuickOpView
 
-    /**
-     * 面板自动关闭计时（M5 起改用 [ScreenAutoClose]，超时值取设置项）。
-     *
-     * 之前是写死 10 秒的 `handler.postDelayed`；原版的超时值是
-     * `Configs.uiScreenAutoCloseDelay`（默认 15 秒，见 `Constants.UI_SCREEN_AUTO_CLOSE_DELAY`），
-     * 所以必须走 [Prefs.uiScreenAutoCloseDelay] 而不是常量。
-     */
-    private val panelAutoClose: ScreenAutoClose by lazy {
-        ScreenAutoClose(Prefs.uiScreenAutoCloseDelay(this)) { hidePanel() }
-    }
+    // ⚠️ v1.11（用户需求 1）：**左侧选台面板不再有任何定时自动关闭**。
+    //
+    // 这里原本是 `private val panelAutoClose: ScreenAutoClose by lazy { … { hidePanel() } }`，
+    // 连同 `resetAutoHide()` 与它的 8 处调用点在本轮**整体删除**。原话：
+    //   「左侧菜单在挑选的时候就不要自动隐藏了，除了选定节目后再自动隐藏，
+    //     要么就等明确按返回或是点空白处才隐藏」
+    //
+    // 删除而不是「超时调大」的原因：面板的收起现在只剩三条**显式**路径 ——
+    //   ① 在面板里选中频道（selectChannel(..., fromPanel = true)）
+    //   ② 按返回键（onBackPressed）
+    //   ③ 点面板外的画面空白（onScreenTap → hitPanel 判定）
+    // 「挑频道」这个动作可能长时间没有任何按键/触摸（在读频道名、在等节目单），
+    // 任何定时器都会在这时把面板收掉、焦点也一并丢失，用户得重新从左边缘唤出 —— 正是被抱怨的体验。
+    //
+    // 设置项「超时自动关闭界面」**仍然生效**，它继续作用于快捷菜单 / 投屏 /
+    // 节目单来源 / 多线路选框 / 播放控制这五处（它们各有自己的 ScreenAutoClose 实例）。
 
     /**
      * 临时频道界面是否可见（对齐原版 `MainContentState.isTempChannelScreenVisible`）。
@@ -478,12 +484,44 @@ class MainActivity : AppCompatActivity() {
         if (Prefs.updateRemindEnable(this)) checkStartupUpdate()
     }
 
+    /**
+     * v1.11（用户需求 4）：**是我把播放暂停的**（去了后台），回来时才由我恢复。
+     *
+     * 不能只看 `player.isPlaying` 就恢复 —— 用户可能自己按过播放控制的暂停键，
+     * 那种情况切后台再回来必须**保持暂停**。用一个标志位记住"暂停是后台造成的"。
+     */
+    private var pausedByBackground = false
+
+    override fun onPause() {
+        super.onPause()
+        // 用户需求 4：跳去其他应用（含系统安装器、权限弹窗、锁屏）前先暂停画面。
+        // 好处有二：后台不再空跑解码与拉流；回来时不会发现画面已经落后一大截。
+        if (!::player.isInitialized) return
+        // 判据用 playWhenReady 而不是 isPlaying：流正在缓冲时 isPlaying 是 false，
+        // 但用户并不是要暂停 —— 那一瞬间切走会漏掉暂停且回来不恢复。
+        val wasPlaying = player.wantsToPlay
+        pausedByBackground = wasPlaying
+        if (wasPlaying) {
+            player.pauseForBackground()
+            UiLog.i("播放", "切到后台 → 自动暂停")
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 用户需求 4：回到播放界面 → 恢复播放。只恢复"后台造成的暂停"。
+        if (!::player.isInitialized || !pausedByBackground) return
+        pausedByBackground = false
+        // 直播跳回直播沿再播；点播保持原进度（详见 PlayerController.resumeFromBackground）。
+        player.resumeFromBackground()
+        UiLog.i("播放", "回到前台 → 恢复播放")
+    }
+
     override fun onDestroy() {
         handler.removeCallbacks(clockTick)
         handler.removeCallbacks(speedTick)
         handler.removeCallbacks(tempChannelHide)
         handler.removeCallbacks(tempInfoMaxShow)
-        panelAutoClose.cancel()
         // 断开台标回调：Activity 已销毁，再回填会拿到一个死掉的 View 树
         ChannelLogoStore.onLogoLoaded = null
         if (::player.isInitialized) player.release()
@@ -702,7 +740,6 @@ class MainActivity : AppCompatActivity() {
         Log.i(Keys.TAG, "长按左键 → EPG 弹层")
         val epg = epgList?.match(currentChannel ?: return)
         epgPanel.open(epg)
-        resetAutoHide()
         // 判据 1：EPG 弹层此前**没有任何超时**，长按左键唤出后不手动按返回就一直挂着
         // （与"节目表 5 秒自动隐藏"直接冲突）。这里给它同一条超时链路。
         epgAutoClose.timeoutMs = Prefs.uiScreenAutoCloseDelay(this)
@@ -1061,7 +1098,6 @@ class MainActivity : AppCompatActivity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         // 判据 1：EPG 弹层开着时任何按键都算"用户操作"，重新计时。
         if (::epgPanel.isInitialized && epgPanel.isOpen) epgAutoClose.active()
-        if (::panel.isInitialized && panel.visibility == View.VISIBLE) resetAutoHide()
         return if (Keys.dispatch(event, currentKeyHandler())) true else super.dispatchKeyEvent(event)
     }
 
@@ -1106,17 +1142,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------------- 面板显隐 ----------------
-    // 对齐原版两处逻辑：
-    //   1) ClassicChannelScreenWrapper 的 onTap = onClose  → 点空白处隐藏
-    //   2) rememberScreenAutoCloseState 的 debounce 超时    → 无操作自动隐藏
+    // v1.11（用户需求 1）：面板的显隐规则**只剩两条**（原版第三条的"无操作超时自动隐藏"已删除）：
+    //   1) ClassicChannelScreenWrapper 的 onTap = onClose  → 点面板外空白隐藏
+    //   2) 面板内选中频道 / 按返回键                        → 显式隐藏
+    // 定时关闭为什么删掉：见上方 panelAutoClose 处的长注释。
 
     private var panelDismissing = false
 
     private fun showPanel() {
-        if (panel.visibility == View.VISIBLE) {
-            resetAutoHide()
-            return
-        }
+        if (panel.visibility == View.VISIBLE) return
         // v1.10（用户需求 2）：三段式面板与快捷功能菜单**互斥**。
         // 两者都要占屏幕左侧/左下，同时出现就是截图 IMG_9161 那种互相叠字。
         // 约定：**谁后开谁负责把对方关掉**。这里是面板后开 → 关掉快捷菜单。
@@ -1134,7 +1168,6 @@ class MainActivity : AppCompatActivity() {
         panel.alpha = 0f
         panel.animate().alpha(1f).setDuration(150L).start()
         refreshTopRight()
-        resetAutoHide()
         // 诊断：面板"看不见"时靠这一行分辨是 alpha 没动画完、还是尺寸/位移不对。
         handler.postDelayed({
             UiLog.i("界面", "面板显隐 可见=${panel.visibility} alpha=${panel.alpha} " +
@@ -1163,25 +1196,8 @@ class MainActivity : AppCompatActivity() {
           panel.animate().alpha(0f).setDuration(150L).start()
           handler.removeCallbacks(hidePanelFinish)
           handler.postDelayed(hidePanelFinish, 170L)
-          panelAutoClose.cancel()
           refreshBottomVisibility()
           refreshChannelInfoBlock()
-    }
-
-    /**
-     * 任何交互都重置面板的超时（超时值取 `Prefs.uiScreenAutoCloseDelay`，默认 15 秒）。
-     *
-     * M5 起改用 [ScreenAutoClose]（语义与快捷菜单那一套一致，对应原版
-     * `rememberScreenAutoCloseState`：CONFLATED + debounce，每次操作都重新计时）。
-     *
-     * 注意：快捷菜单（M8）**不在这里计时** —— 它有自己的 [ScreenAutoClose] 实例，
-     * 两个界面各自计时、互不干扰；混用一个会互相打架。
-     */
-    private fun resetAutoHide() {
-        // 判据 1：每次都读最新设置值 —— 面板实例是 by lazy 建的，固定住超时值会导致
-        // 「超时自动关闭界面」改了要等重启才生效。
-        panelAutoClose.timeoutMs = Prefs.uiScreenAutoCloseDelay(this)
-        if (panel.visibility == View.VISIBLE) panelAutoClose.active() else panelAutoClose.cancel()
     }
 
     /**
@@ -1202,9 +1218,9 @@ class MainActivity : AppCompatActivity() {
      * 判据 1：底栏现在会跟着面板一起自动收起，但状态提示不能跟着消失 —— 所以这类消息
      * 单独给一个显示窗口（[BOTTOM_STATUS_MS]），窗口内即使面板不在屏也保持可见。
      */
-    private fun showBottomStatus(msg: String, sticky: Boolean = false) {
+    private fun showBottomStatus(msg: String, sticky: Boolean = false, durationMs: Long = BOTTOM_STATUS_MS) {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            handler.post { showBottomStatus(msg, sticky) }
+            handler.post { showBottomStatus(msg, sticky, durationMs) }
             return
         }
         bottomStatusText.text = msg
@@ -1212,7 +1228,31 @@ class MainActivity : AppCompatActivity() {
         bottomProgBlock.visibility = View.GONE          // 状态消息优先，节目区让位
         bottomEpgCur = null
         bottomStatusSticky = sticky
-        bottomStatusUntil = SystemClock.uptimeMillis() + BOTTOM_STATUS_MS
+        bottomStatusUntil = SystemClock.uptimeMillis() + durationMs
+        refreshBottomVisibility()
+    }
+
+    /**
+     * v1.11（用户需求 3）：主动收掉底栏那条状态提示（尤其是 `sticky` 的）。
+     *
+     * 为什么单独加一个"清"：`sticky = true` 的提示**没有到期时间**，
+     * `refreshBottomVisibility()` 会因为它一直把底栏留在屏上。之前「检查更新」用它显示
+     * 「正在检查更新…」，而成功分支直接去弹「发现新版本」对话层、从没清过 —— 于是
+     * 底部永久挂着「正在检查更新…」（用户看到的就是"底下多了一个转圈的加载中"），
+     * 点「立即更新」后它还压在下载进度层下面同时显示。
+     */
+    private fun clearBottomStatus() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post { clearBottomStatus() }
+            return
+        }
+        if (!::bottomStatusText.isInitialized) return
+        bottomStatusSticky = false
+        bottomStatusUntil = 0L
+        handler.removeCallbacks(bottomStatusExpire)
+        bottomStatusText.visibility = View.GONE
+        // 状态文字让位时节目区是 GONE，清完要还给节目区，否则底栏会变成一张空白卡片
+        if (::bottomProgBlock.isInitialized) bottomProgBlock.visibility = View.VISIBLE
         refreshBottomVisibility()
     }
 
@@ -1238,8 +1278,12 @@ class MainActivity : AppCompatActivity() {
         val show = panelVisible || statusAlive
         bottomBar.visibility = if (show) View.VISIBLE else View.GONE
         if (show && !bottomStatusSticky && bottomStatusUntil > 0L) {
-            handler.removeCallbacks(bottomStatusExpire)
-            handler.postDelayed(bottomStatusExpire, BOTTOM_STATUS_MS + 80L)
+            // v1.11：按**剩余时间**续期（原来写死 BOTTOM_STATUS_MS+80，长提示会被提前收掉）
+            val remain = bottomStatusUntil - SystemClock.uptimeMillis()
+            if (remain > 0L) {
+                handler.removeCallbacks(bottomStatusExpire)
+                handler.postDelayed(bottomStatusExpire, remain + 80L)
+            }
         }
     }
 
@@ -1547,7 +1591,9 @@ class MainActivity : AppCompatActivity() {
         if (::quickOp.isInitialized && quickOp.isOpen) return
 
         if (panel.visibility == View.VISIBLE) {
-            if (hitPanel(x, y)) resetAutoHide() else hidePanel()
+            // v1.11（用户需求 1）：点在面板**内部**什么都不做（原来会 resetAutoHide 续期）。
+            // 点在面板外的空白 → 收面板，这是面板的显式关闭路径之一。
+            if (!hitPanel(x, y)) hidePanel()
         } else if (x < resources.displayMetrics.widthPixels * 0.32f) {
             // 问题 1：触摸唤醒同样回到上次光标位置
             showPanel()
@@ -1757,7 +1803,6 @@ class MainActivity : AppCompatActivity() {
                         navColumn.getChildAt(0)?.requestFocus()
                         FocusEngine.focusFirstIn(channelColumn)
                     }, 80L)
-                    resetAutoHide()
                 }
                 // 问题 6：真正可用的分组管理（原来只弹一句 Snackbar）
                 onGroupManage = { showGroupManage(counterpart = false) }
@@ -2971,17 +3016,32 @@ class MainActivity : AppCompatActivity() {
         }, 8_000L)
     }
 
-    /** 设置 → 应用 → 检查更新（v1.8：入口从「更新」分类移到这里）。 */
+    /**
+     * 设置 → 应用 → 检查更新（v1.8：入口从「更新」分类移到这里）。
+     *
+     * v1.11（用户需求 3）：两处修正 ——
+     *  ① 加 [updateChecking] 防重入：连点「检查更新」原来会并发发出多次请求、
+     *     并且每次都往底栏写一条粘性提示；
+     *  ② 出结果后**先 [clearBottomStatus]** 再走后续分支。原来只有"失败"分支会重写
+     *     底栏、"成功"分支直接弹对话层，于是「正在检查更新…」这条粘性提示永远留在底部。
+     */
     private fun checkForUpdate() {
+        if (updateChecking) return
+        updateChecking = true
         showBottomStatus("正在检查更新…", sticky = true)
         Thread {
             // v1.8：线路改为**自动**（raw → 镜像，谁通走谁），设置里不再让用户手动选
             // （用户原话："更新通道怎么有三个？一个就好"）。
             val (info, err) = UpdateRepository.check(UpdateRepository.LINE_AUTO)
             handler.post {
+                updateChecking = false
+                clearBottomStatus()
                 when {
-                    err != null -> showBottomStatus("检查更新失败：$err", sticky = true)
-                    info == null -> showBottomStatus("检查更新失败：版本清单为空", sticky = true)
+                    err != null ->
+                        // 失败提示给 6 秒窗口后自动消失：不再用 sticky（否则又变成"底部多一个东西"）
+                        showBottomStatus("检查更新失败：$err", durationMs = 6_000L)
+                    info == null ->
+                        showBottomStatus("检查更新失败：版本清单为空", durationMs = 6_000L)
                     !info.isNewerThanCurrent() ->
                         Snackbar.show("已是最新版本（${BuildConfigCompat.VERSION_NAME}）", this)
                     else -> showUpdateDialog(info)
@@ -2989,6 +3049,9 @@ class MainActivity : AppCompatActivity() {
             }
         }.start()
     }
+
+    /** v1.11：防止「检查更新」被连点出多份并发请求与多份提示。 */
+    private var updateChecking = false
 
     /** 有新版本时的确认框（应用风格自绘，与「添加直播源」同一套）。 */
     private fun showUpdateDialog(info: UpdateRepository.UpdateInfo) {
@@ -3017,9 +3080,16 @@ class MainActivity : AppCompatActivity() {
      * 由用户点一下再拉起系统安装器。
      */
     private fun downloadUpdate(info: UpdateRepository.UpdateInfo) {
+        // v1.11（用户需求 3）：进下载层之前先把底栏那条「正在检查更新…」清掉 ——
+        // 否则下载进度层和它同屏，用户看到的就是"底下多了一个一直转圈的东西"。
+        clearBottomStatus()
         val view = UpdateProgressView(this)
         updateProgress = view
         view.setProgress(0, 0L, info.sizeBytes)
+        // v1.11：进度层刚出现时不能是一根停在 0% 的条（用户读成"卡住了"）。
+        // 真实原因：`UpdateRepository.download` 会先并发探测 5 条线路（1~9 秒），
+        // 这期间没有任何字节，进度条只能停在 0%。把这句写出来，等待就有了解释。
+        view.setConnecting("正在选择下载线路（国内镜像 / GitHub 直连）…")
         view.onCancel = {
             cancelUpdateDownload = true
             closeUpdateProgress()
@@ -3051,8 +3121,14 @@ class MainActivity : AppCompatActivity() {
             }
             handler.post {
                 if (file == null) {
-                    updateProgress?.setFailed(err ?: "下载失败")
-                    UiLog.w("界面", "更新下载失败：$err")
+                    // v1.11（用户需求 3b）：失败原因按线路逐条列出（"所有下载线路都不可用"
+                    // 时要让用户知道是网络问题还是线路问题），并在末尾给一句可执行的建议。
+                    val reason = err ?: "下载失败"
+                    updateProgress?.setFailed(
+                        if (reason == "已取消") reason
+                        else "$reason\n若多次失败，请确认本机网络能访问 GitHub（可在路由器上放行或改用热点重试）"
+                    )
+                    UiLog.w("界面", "更新下载失败：$reason")
                 } else {
                     pendingInstallApk = file
                     updateProgress?.setFinished(file.name)
@@ -3312,8 +3388,6 @@ class MainActivity : AppCompatActivity() {
         rootView.addView(built.root, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         built.root.bringToFront()
-        // 对话框开着时不要让面板超时把背景收掉（输入过程中面板消失会很突兀）
-        panelAutoClose.cancel()
         built.firstFocus?.post { built.firstFocus?.requestFocus() }
     }
 
@@ -3321,7 +3395,6 @@ class MainActivity : AppCompatActivity() {
         val v = dialogView ?: return
         (v.parent as? ViewGroup)?.removeView(v)
         dialogView = null
-        resetAutoHide()
     }
 
     private fun renderChannels(group: ChannelGroup) {
@@ -3465,7 +3538,6 @@ class MainActivity : AppCompatActivity() {
             // 原版 `MainContentState.isTempChannelScreenVisible`：换台后显示 1.5 秒临时频道界面
             showTempChannelInfo()
         }
-        resetAutoHide()
         // M7：换台后立刻刷新第三列与底栏节目信息
         renderEpgForCurrent()
     }
