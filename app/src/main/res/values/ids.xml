@@ -6,4 +6,9 @@
 <resources>
     <!-- 节目单管理列表项右侧的「使用中」状态标签（EpgSourceView 增量刷新用） -->
     <item name="epg_src_status" type="id" />
+
+    <!-- 多线路选框行右侧的状态标签（LinePickerView 增量刷新用） -->
+    <item name="line_pick_note" type="id" />
+    <!-- 播放控制弹层的进度条（PlayerControlView 打开时聚焦它） -->
+    <item name="player_seek_bar" type="id" />
 </resources>

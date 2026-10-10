@@ -70,6 +70,8 @@ import top.yogiczy.mytv.legacy.ui.panel.ChannelColumnView
 import top.yogiczy.mytv.legacy.ui.panel.NavColumnView
 import top.yogiczy.mytv.legacy.ui.panel.PanelHost
 import top.yogiczy.mytv.legacy.ui.panel.SourcePanelView
+import top.yogiczy.mytv.legacy.ui.player.LinePickerView
+import top.yogiczy.mytv.legacy.ui.player.PlayerControlView
 import top.yogiczy.mytv.legacy.ui.epg.EpgColumnView
 import top.yogiczy.mytv.legacy.ui.settings.SettingsView
 import top.yogiczy.mytv.legacy.ui.settings.GroupManageView
@@ -341,6 +343,8 @@ class MainActivity : AppCompatActivity() {
             updateClock()
             if (::quickOp.isInitialized) quickOp.tick()   // 快捷菜单顶栏的「日期 + HH:mm:ss」
             if (::datetime.isInitialized) refreshDatetime()   // 原版 DatetimeScreen（每秒轮询）
+            // v1.9（用户需求 5）：播放控制弹层开着时，进度条每秒跟着走
+            refreshPlayerControl()
             // 判据 4：底栏的网速角标与当前节目进度条每秒刷新（原版也是每秒轮询）
             if (::player.isInitialized && ::tagSpeed.isInitialized) {
                 tagSpeed.text = "${player.speedKBps}KB/s"
@@ -416,6 +420,18 @@ class MainActivity : AppCompatActivity() {
     /** v1.8：节目单管理抽屉。 */
     private var epgSourceView: EpgSourceView? = null
 
+    /** v1.9：多线路右侧选框（用户需求 5）。 */
+    private var linePicker: LinePickerView? = null
+
+    /** v1.9：播放控制弹层（用户需求 5）。 */
+    private var playerControl: PlayerControlView? = null
+
+    /** v1.9：当前频道的起播时刻，用于"点播播完"的连播去抖（用户需求 3）。 */
+    private var channelStartedAt = 0L
+
+    /** v1.9：上一次自动连播的时刻，防止连续的 ENDED 事件连跳两集。 */
+    private var lastAutoNextAt = 0L
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enterFullscreen()
@@ -446,6 +462,8 @@ class MainActivity : AppCompatActivity() {
         player.onError = { msg ->
             showBottomStatus("播放失败 — $msg", sticky = true)
         }
+        // v1.9（用户需求 3）：点播内容播完 → 自动接下一个（同分组下一个，组末接下一分组）
+        player.onEnded = { onPlaybackEnded() }
 
         UiLog.i("界面", "密度缩放：${Density.describe(this)}")
 
@@ -540,6 +558,17 @@ class MainActivity : AppCompatActivity() {
         if (epgSourceView != null) {
             cancelExitConfirm()
             closeEpgSourceManage()
+            return
+        }
+        // v1.9（用户需求 5）：播放控制弹层 / 多线路选框优先于面板
+        if (playerControl != null) {
+            cancelExitConfirm()
+            closePlayerControl()
+            return
+        }
+        if (linePicker != null) {
+            cancelExitConfirm()
+            closeLinePicker()
             return
         }
         // v1.8：更新下载中，返回键 = 取消下载（与进度层上的「取消」同义），不退出应用
@@ -872,16 +901,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 原版 `onLongRight`：长按右键 → 多线路弹层（M6/M7）。 */
+    /** 原版 `onLongRight`：长按右键 → 多线路选框（v1.9 真正接通，用户需求 5）。 */
     private fun onLongRightPlaceholder() {
-        Log.i(Keys.TAG, "长按右键 → 多线路弹层（M6/M7）")
-        Snackbar.show("多线路弹层将在 M6/M7 接入", this)
+        Log.i(Keys.TAG, "长按右键 → 多线路选框")
+        showLinePicker()
     }
 
-    /** 原版 `onLongDown`：长按下键 → 播放控制弹层（M8/M9）。 */
+    /** 原版 `onLongDown`：长按下键 → 播放控制弹层（v1.9 真正接通，用户需求 5）。 */
     private fun onLongDownPlaceholder() {
-        Log.i(Keys.TAG, "长按下键 → 播放控制弹层（M8/M9）")
-        Snackbar.show("播放控制弹层将在 M8/M9 接入", this)
+        Log.i(Keys.TAG, "长按下键 → 播放控制弹层")
+        showPlayerControl()
     }
 
     // ---------------- 换台 / 切线路 / 数字选台 ----------------
@@ -914,6 +943,8 @@ class MainActivity : AppCompatActivity() {
         val next = ((cur + step) % count + count) % count   // 负数取模：保证左滑也能轮回
         if (next == cur) return
         player.switchLine(next)
+        // v1.9（用户需求 3）：换线路 = 重新起播，起播时刻一并复位
+        channelStartedAt = SystemClock.uptimeMillis()
         // 问题 3（用户）：左右切换同名源的线路时，同样弹频道信息块
         showTempChannelInfo()
         UiLog.i("界面", "切线路 → ${next + 1}/${count}（循环）")
@@ -994,6 +1025,10 @@ class MainActivity : AppCompatActivity() {
             else if (dlnaView != null) keysNone
             // v1.8：节目单管理抽屉开着时放行给控件（列表项要能吃确认键 / 删除键）
             else if (epgSourceView != null) keysNone
+            // v1.9（用户需求 5）：多线路选框 / 播放控制弹层 —— 都放行给焦点系统，
+            // 进度条要自己吃左右键（SeekBar 原生就支持），按钮要能吃确认键。
+            else if (linePicker != null) keysNone
+            else if (playerControl != null) keysNone
             // v1.8：更新进度层（按钮要能吃确认键）
             else if (updateProgress != null) keysNone
             // ⚠️ 设置页打开时必须放行给焦点系统：否则方向键会被解释成"换台"，
@@ -1082,6 +1117,10 @@ class MainActivity : AppCompatActivity() {
             resetAutoHide()
             return
         }
+        // v1.10（用户需求 2）：三段式面板与快捷功能菜单**互斥**。
+        // 两者都要占屏幕左侧/左下，同时出现就是截图 IMG_9161 那种互相叠字。
+        // 约定：**谁后开谁负责把对方关掉**。这里是面板后开 → 关掉快捷菜单。
+        if (::quickOp.isInitialized && quickOp.isOpen) quickOp.close()
         panelDismissing = false
         // 问题 1：改可见性**之前**快照「上次光标在哪」，并屏蔽打开窗口期内的伪聚焦 ——
         // 否则系统自动聚焦分组栏第一项「换源」，中栏被换成订阅源列表、记忆也被冲掉。
@@ -1280,8 +1319,12 @@ class MainActivity : AppCompatActivity() {
         topNumber.visibility = v
         topDate.visibility = v
         topLogo.visibility = if (showFull && topLogo.drawable != null) View.VISIBLE else View.GONE
-        // 不在快捷菜单里时，topTime 总在 —— 面板收起时它就代表"大号 HH:mm"
-        topTime.visibility = if (quickOpOpen) View.GONE else View.VISIBLE
+        // v1.9（用户需求 2）：**拼块里的时间只在"完整块"出现**。
+        // 原来这里是「不在快捷菜单里就恒为 VISIBLE」—— 于是右上角那个时钟**永远在**，
+        // 「界面 → 时间显示」这个设置项怎么切都看不出区别（用户报的正是这个）。
+        // 现在：完整块（面板在屏 / 换台后 1.5 秒）里显示 HH:mm；
+        // 收起状态下**一律交给 DatetimeView**，由它按 UiTimeShowMode 决定显示与否。
+        topTime.visibility = v
 
         updateClock()
         refreshDatetime()
@@ -1295,19 +1338,27 @@ class MainActivity : AppCompatActivity() {
      * `suppressed` 就是原版 `Visible{}` 的那些取反条件：只要面板 / 快捷菜单 / 临时频道界面
      * 有一个在显示，就轮到它"让位"。
      *
-     * ⚠️ 本工程默认配置（`UI_TIME_SHOW_MODE = HIDDEN`）走的是上面那条「只留 HH:mm」的档
-     * （《第二步计划》§M5 验收 3 明确要求，见 PROJECT-STATE「与原版有意差异」）。
-     * 因此**只有用户把 `UI_TIME_SHOW_MODE` 改成非 HIDDEN 时**本图层才会真正接管右上角；
-     * 接管时把 [topTime] 收起来，避免同一位置两个时间叠字。
+     * v1.9（用户需求 2）：**这里不再去动 [topTime]**。原来两条链路互相覆盖
+     * （本方法写 GONE/VISIBLE、[refreshTopRight] 又写一遍），结果是"设置项永远无效、
+     * 右上角时间永远在"。现在职责单一：
+     *   · 完整块在屏（面板/临时信息块）→ [refreshTopRight] 负责，显示 HH:mm；
+     *   · 反之 → 本方法按 `UiTimeShowMode` 决定这个独立图层的显隐：
+     *       HIDDEN     不显示（原版默认，`配置项` 真正生效」
+     *       ALWAYS     一直显示 HH:mm
+     *       EVERY_HOUR 整点前后 30 秒显示 HH:mm:ss
+     *       HALF_HOUR  半点前后 30 秒显示 HH:mm:ss
      */
     private fun refreshDatetime() {
         if (!::datetime.isInitialized) return
         val overlayUp = panel.visibility == View.VISIBLE ||
                 tempChannelVisible ||
-                (::quickOp.isInitialized && quickOp.isOpen)
+                (::quickOp.isInitialized && quickOp.isOpen) ||
+                playerControl != null ||
+                linePicker != null ||
+                epgSourceView != null ||
+                (::settings.isInitialized && settings.isOpen)
         val mode = runCatching { Prefs.uiTimeShowMode(this) }.getOrDefault(UiTimeShowMode.HIDDEN)
-        val shown = datetime.tick(suppressed = overlayUp, mode = mode)
-        topTime.visibility = if (shown) View.GONE else View.VISIBLE
+        datetime.tick(suppressed = overlayUp, mode = mode)
     }
 
     /** 远程台标到位：按频道名就地换图（不重建列表，保住焦点与滚动位置）。 */
@@ -1384,7 +1435,12 @@ class MainActivity : AppCompatActivity() {
     /**
      * v1.7（用户要求）：全屏画面上的滑动手势（面板/弹层都不在屏时才生效）——
      *  · **上滑 = 下一频道，下滑 = 上一频道**（跨分组循环，与遥控器上下键同一条链路）；
-     *  · **右滑 = 下一条线路，左滑 = 上一条线路**（多线路频道才有动作，与左右键一致）。
+     *  · **左滑 = 下一条线路，右滑 = 上一条线路**（多线路频道才有动作）。
+     *
+     * v1.9（用户需求 4）：**左右滑的方向按用户反馈对调**。
+     * 原来是「右滑 = 下一条 / 左滑 = 上一条」，用户反馈"不符合直觉"。
+     * 现在按"翻页"的直觉：**手指向左划 = 往后翻（下一条），向右划 = 往前翻（上一条）**。
+     * 遥控器左右键**没动**（右键 = 下一条仍是标准语义）—— 用户只提了滑动手势。
      *
      * 用 onFling（要有初速度）而不是 onScroll：慢慢拖动 EPG 列表不会误触发换台。
      * 防抖只挡 500ms 内的重复触发（一次 fling 的 DOWN/UP 序列不会重复回调），
@@ -1401,6 +1457,8 @@ class MainActivity : AppCompatActivity() {
         if (dlnaView != null) return                // 投屏抽屉开着时不生效
         if (epgSourceView != null) return           // v1.8：节目单管理抽屉开着时不生效
         if (updateProgress != null) return          // v1.8：更新下载进度层在屏时不生效
+        if (linePicker != null) return              // v1.9：多线路选框在屏时不生效
+        if (playerControl != null) return           // v1.9：播放控制弹层在屏时不生效
         if (panel.visibility == View.VISIBLE) return
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastSwipeAt < 500L) return        // 防抖：连续 fling 只认第一次
@@ -1409,10 +1467,11 @@ class MainActivity : AppCompatActivity() {
         val adx = Math.abs(dx)
         val ady = Math.abs(dy)
         if (adx < SWIPE_MIN_PX && ady < SWIPE_MIN_PX) return
-        UiLog.i("手势", "滑动换台 dx=$dx dy=$dy → " + if (adx > ady) (if (dx > 0) "下一条线路" else "上一条线路") else (if (dy < 0) "下一频道" else "上一频道"))
+        UiLog.i("手势", "滑动换台 dx=$dx dy=$dy → " + if (adx > ady) (if (dx > 0) "上一条线路" else "下一条线路") else (if (dy < 0) "下一频道" else "上一频道"))
         if (adx > ady) {
-            // 水平主轴 → 切线路（右滑 +1 下一条，左滑 -1 上一条，与遥控器左右键一致）
-            changeLineBy(if (dx > 0) 1 else -1)
+            // v1.9（用户需求 4）：水平主轴 → 切线路。左滑 = 下一条（-1 号参数给 changeLineBy 的 step
+            // 是 +1）、右滑 = 上一条。与遥控器左右键**刻意相反**，因为用户明确只要改手势。
+            changeLineBy(if (dx > 0) -1 else +1)
         } else {
             // 垂直主轴 → 切频道（用户指定：上滑 = 下一个，下滑 = 上一个）
             changeChannelBy(if (dy < 0) 1 else -1)
@@ -1423,23 +1482,70 @@ class MainActivity : AppCompatActivity() {
         if (!::panel.isInitialized) return          // 判据 11-2：崩溃报告屏下视图树未建
         if (dialogView != null) return              // 自绘对话框开着时，画面点击不生效
         if (agreementGate != null) return           // v1.7：《使用须知》没同意前点击不穿透
-        // 问题 6：分组管理抽屉开着时，点面板以外的地方 = 关闭抽屉
-        if (groupManageView != null) {
-            closeGroupManage()
+        // v1.9：播放控制 / 多线路在屏时，画面点击一律不穿透给下层。
+        // ⚠️ **不要在这里直接关掉它们**：`dispatchTouchEvent` 是先把事件喂给手势检测、
+        // 之后才派发进 View 树，若这里就关，紧接着的 View 树派发会落在一个已被移除的
+        // 视图上 —— 结果就是"点列表项没反应、框却没了"。
+        //
+        // v1.10：关闭改为**几何判定 + post 到下一轮**。原来指望覆盖层根节点的
+        // `setOnClickListener` 来关，实测**根本不触发**：全屏沉浸式窗口下，覆盖层根节点
+        // 自己的 onTouchEvent 收不到点击（同一屏里列表行倒是能收到，诊断日志
+        // `顶层=LinePickerView[0,0,1280,720]` 证明它确实在最上层却仍不响应）。
+        // 于是"点空白关掉"这条在 v1.9 是坏的。现在在手势阶段按坐标判断，
+        // 不依赖任何视图的点击派发，再延到下一轮消息才真正移除视图。
+        if (playerControl != null) {
+            val v = playerControl
+            if (v != null && !v.isInContent(x, y)) rootView.post { if (playerControl === v) closePlayerControl() }
             return
         }
-        // 问题 6：投屏抽屉同理
+        if (linePicker != null) {
+            val v = linePicker
+            if (v != null && !v.isInContent(x, y)) rootView.post { if (linePicker === v) closeLinePicker() }
+            return
+        }
+
+        // ---------------------------------------------------------------------------
+        // v1.10（用户需求 2 / 3）：**凡是有模态层在屏，这里一律只 return，不做任何动作。**
+        //
+        // 原来这三个抽屉在这里是直接 `closeXxx()` 关掉的，这就是用户报的两个现象的**同一个根因**：
+        //   `dispatchTouchEvent` 是「先把事件喂给手势检测、再派发进 View 树」，
+        //   于是点列表行时 ACTION_UP 一进来就把整个抽屉移除了，等 `super.dispatchTouchEvent`
+        //   派发时 ViewGroup 的触摸目标链已被清空（`removeViewInternal` 会把该 child 从
+        //   `mFirstTouchTarget` 摘掉）→ **行的 onClick 永远不触发**。
+        //   现象①：抽屉消失但投屏没发生（用户原话「点了菜单就隐藏了…实际是没投成功的」）。
+        //   现象②：紧接着再点一下，守卫不再命中、又落到下面的 `x < 32%` 分支 →
+        //          把左侧三段式面板唤了出来（用户原话「投屏的时候点开会唤起左侧菜单」）。
+        //
+        // 现在关闭统一交给抽屉**自己的遮罩点击**（根节点都挂了 onClose），与
+        // LinePickerView / PlayerControlView 同一套约定。
+        // ---------------------------------------------------------------------------
+        if (groupManageView != null) return
         if (dlnaView != null) {
-            closeDlnaCast()
+            // v1.10（用户需求 3）：点抽屉**本体以外** = 关抽屉，但**必须延到下一轮消息**再关。
+            // 这里还在手势检测阶段（早于 View 树派发），当场 removeView 会清空 ViewGroup 的
+            // 触摸目标链，正在被点的设备行就收不到 onClick 了（用户报的「点了没反应」）。
+            //
+            // ⚠️ 用几何判定而不是靠抽屉根节点的 setOnClickListener：实测遮罩区域
+            // （抽屉面板之外的任何位置）合成/触摸点都送不到根节点上，只有列表行能收到，
+            // 所以根节点的 onClick 完全不可靠。这里在手势阶段判定，不受任何遮挡影响。
+            val v = dlnaView
+            if (v != null && !v.isInContent(x, y)) {
+                rootView.post { if (dlnaView === v) closeDlnaCast() }
+            }
             return
         }
-        // v1.8：节目单管理抽屉开着时，点面板以外 = 关抽屉
-        if (epgSourceView != null) {
-            closeEpgSourceManage()
-            return
-        }
-        // v1.8：更新下载进度层是模态的，点画面不穿透
+        if (epgSourceView != null) return
         if (updateProgress != null) return
+
+        // v1.10：设置页 / 快捷菜单在屏时同样不穿透。
+        //  · 快捷菜单的 7 个按钮都贴左下角（x 很小），不挡的话点任意一个按钮都会顺手
+        //    把三段式面板也打开 —— 这正是截图 IMG_9161「左侧菜单与长按菜单同时显示」的成因之一。
+        //  · 设置页不挡的话，点设置项会在背后冒出一个三段式面板
+        //    （模拟器实测日志：「面板唤出 → 光标回到分组栏第 3 项」）。
+        // 两者的关闭同样由它们自己的遮罩点击负责（QuickOpView 根节点已挂 onClick = close）。
+        if (::settings.isInitialized && settings.isOpen) return
+        if (::quickOp.isInitialized && quickOp.isOpen) return
+
         if (panel.visibility == View.VISIBLE) {
             if (hitPanel(x, y)) resetAutoHide() else hidePanel()
         } else if (x < resources.displayMetrics.widthPixels * 0.32f) {
@@ -1465,6 +1571,10 @@ class MainActivity : AppCompatActivity() {
             quickOp.close()
             return
         }
+        // v1.10（用户需求 2）：与 [showPanel] 互斥，谁后开谁关掉对方（见 showPanel 的注释）。
+        // 原来这里什么都不做，于是在经典面板上按 MENU / 长按确认键，两个界面会同时挂在屏上
+        // —— 用户截图 IMG_9161 就是这个。
+        if (::panel.isInitialized && panel.visibility == View.VISIBLE) hidePanel()
         // 频道号 = 全局下标 + 1（原版 QuickOpScreen 的 currentChannelNumberProvider）
         val n = currentChannelNumber()
         quickOp.open(
@@ -1531,24 +1641,17 @@ class MainActivity : AppCompatActivity() {
             }
 
             QuickOpView.Action.CHANNEL_URL -> {
+                // v1.9（用户需求 5）：原来只弹一句「多线路列表将在 M6/M7 接入」——
+                // 现在真正弹出**屏幕右侧的线路选框**。
                 quickOp.close()
-                if (panel.visibility != View.VISIBLE) showPanel()
-                setPanelExpanded(true)
-                Snackbar.show("多线路列表将在 M6/M7 接入", this)
+                showLinePicker()
             }
 
             QuickOpView.Action.CONTROLLER -> {
-                // 原版「播放控制」是独立面板（倍速/软硬解/时移）。本轮先给**可观测的等价动作**：
-                // 播放/暂停切换，并在提示里回显当前是否已切软解。
-                if (::player.isInitialized) {
-                    if (player.player.isPlaying) {
-                        player.pause()
-                        Snackbar.show("已暂停（软解=${player.isSoftDecode}）", this)
-                    } else {
-                        player.play()
-                        Snackbar.show("继续播放（软解=${player.isSoftDecode}）", this)
-                    }
-                }
+                // v1.9（用户需求 5）：原来只是"播放/暂停 + 一句提示"，
+                // 现在打开真正的播放控制弹层（含可调进度条、快进快退、多线路入口）。
+                quickOp.close()
+                showPlayerControl()
             }
 
             QuickOpView.Action.DISPLAY_MODE -> {
@@ -1663,6 +1766,11 @@ class MainActivity : AppCompatActivity() {
                 onCheckUpdate = { checkForUpdate() }
                 // v1.8：节目单管理（内置 + 自定义，可切换 / 删除 / 添加）
                 onCustomEpg = { showEpgSourceManage() }
+                // v1.9（用户需求 1）：设置页里直接切换节目单来源 → 立刻按新源重拉
+                onEpgSourceChanged = { src ->
+                    showBottomStatus("已切换节目单：${src.name}，正在重新加载…")
+                    fetchEpg()
+                }
                 // v1.8：播放器 UA 录入（原来那一行只能看不能改）
                 onEditUa = { editUaDialog() }
                 onResetAll = {
@@ -2544,6 +2652,8 @@ class MainActivity : AppCompatActivity() {
      */
     private fun showEpgSourceManage() {
         closeEpgSourceManage()
+        // v1.9（用户需求 1）：先记下设置页当前停在哪一行，抽屉关掉后搬回去
+        if (::settings.isInitialized && settings.isOpen) settings.rememberFocus()
         val view = EpgSourceView(this)
         epgSourceView = view
         val current = Prefs.epgSourceCurrent(this)
@@ -2554,6 +2664,9 @@ class MainActivity : AppCompatActivity() {
                 Prefs.setEpgSourceCurrent(this, src)
                 UiLog.i("节目单", "切换到节目单：${src.name}")
                 closeEpgSourceManage()
+                // v1.9（用户需求 1）：给一条明确的可见反馈 —— 原来切完只是静默关掉抽屉，
+                // 加上设置页跳回「关于」，用户体感就是"点了没反应/切不过去"。
+                showBottomStatus("已切换节目单：${src.name}，正在重新加载…")
                 fetchEpg()
             } else {
                 closeEpgSourceManage()
@@ -2605,6 +2718,190 @@ class MainActivity : AppCompatActivity() {
         val v = epgSourceView ?: return
         (v.parent as? ViewGroup)?.removeView(v)
         epgSourceView = null
+        // v1.9（用户需求 1）：抽屉摘掉后焦点会被系统丢给窗口里第一个可聚焦视图 ——
+        // 那正是设置页左栏的第一项「关于」，于是**设置页会从「节目单」跳回「关于」**，
+        // 用户看到的像是"点了之后什么都没发生、还退到别的分类去了"。
+        // 现在把焦点还回设置页刚才那一行，让切换结果原地可见。
+        if (::settings.isInitialized && settings.isOpen) {
+            handler.postDelayed({ runCatching { settings.restoreContentFocus() } }, 60L)
+        }
+    }
+
+    // ======================= v1.9：多线路选框 / 播放控制（用户需求 5） =======================
+
+    /** 多线路选框的自动关闭（超时值取「超时自动关闭界面」设置）。 */
+    private val linePickerAutoClose: ScreenAutoClose by lazy {
+        ScreenAutoClose(Prefs.uiScreenAutoCloseDelay(this)) { closeLinePicker() }
+    }
+
+    /** 播放控制弹层的自动关闭。 */
+    private val playerControlAutoClose: ScreenAutoClose by lazy {
+        ScreenAutoClose(Prefs.uiScreenAutoCloseDelay(this)) { closePlayerControl() }
+    }
+
+    /**
+     * 弹出**右侧**的多线路选框：列出同一频道的全部线路 + 当前态，确认键即切换。
+     *
+     * 入口有三处，与用户"多线路的那个点开"对齐：
+     *   · 快捷菜单「多线路」；
+     *   · 遥控器**长按右键**（原版 `onLongRight`）；
+     *   · 播放控制弹层里的「多线路」按钮。
+     */
+    private fun showLinePicker() {
+        if (!::player.isInitialized) return
+        val total = player.lineCount
+        if (total <= 1) {
+            Snackbar.show("当前频道只有 1 条线路", this)
+            return
+        }
+        closeLinePicker()
+        val v = LinePickerView(this)
+        linePicker = v
+        v.channelName = currentChannel?.name.orEmpty()
+        v.onClose = { closeLinePicker() }
+        v.onPick = { idx ->
+            if (idx != player.currentLineIdx) {
+                player.switchLine(idx)
+                channelStartedAt = SystemClock.uptimeMillis()
+                showTempChannelInfo()
+                UiLog.i("界面", "多线路选框 → 切到第 ${idx + 1}/$total 条")
+            }
+            closeLinePicker()
+        }
+        v.show {
+            player.lineUrls.mapIndexed { i, url ->
+                LinePickerView.Row(index = i, url = url, current = i == player.currentLineIdx)
+            }
+        }
+        rootView.addView(v, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        linePickerAutoClose.timeoutMs = Prefs.uiScreenAutoCloseDelay(this)
+        linePickerAutoClose.active()
+        UiLog.i("界面", "多线路选框已弹出（共 $total 条，当前第 ${player.currentLineIdx + 1} 条）")
+    }
+
+    private fun closeLinePicker() {
+        val v = linePicker ?: return
+        linePickerAutoClose.cancel()
+        (v.parent as? ViewGroup)?.removeView(v)
+        linePicker = null
+    }
+
+    /**
+     * 弹出播放控制弹层：**可调进度条** + 播放/暂停 + 快退快进 + 多线路入口。
+     *
+     * 入口：快捷菜单「播放控制」/ 遥控器**长按下键**（原版 `onLongDown`）。
+     */
+    private fun showPlayerControl() {
+        if (!::player.isInitialized) return
+        closePlayerControl()
+        val v = PlayerControlView(this)
+        playerControl = v
+        v.onClose = { closePlayerControl() }
+        v.onTogglePlay = {
+            if (player.isPlaying) player.pause() else player.play()
+            refreshPlayerControl()
+            playerControlAutoClose.timeoutMs = Prefs.uiScreenAutoCloseDelay(this)
+            playerControlAutoClose.active()
+        }
+        v.onSeekTo = { ms -> player.seekTo(ms) }
+        v.onSeekBy = { delta ->
+            if (player.isLive && player.duration <= 0L) {
+                // 直播且拿不到时长：HLS 时移窗口内 seek 仍然有效，交给播放器自己判定
+                UiLog.i("播放", "直播快进/快退 ${delta / 1000}s（时移）")
+            }
+            player.seekBy(delta)
+        }
+        v.onPickLine = { showLinePicker() }
+        rootView.addView(v, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        v.open()
+        refreshPlayerControl()
+        playerControlAutoClose.timeoutMs = Prefs.uiScreenAutoCloseDelay(this)
+        playerControlAutoClose.active()
+        UiLog.i(
+            "界面",
+            "播放控制弹层已弹出（${if (player.isLive) "直播·进度条不可拖" else "点播·可拖动进度条"}，" +
+                "时长=${player.duration}ms）"
+        )
+    }
+
+    private fun closePlayerControl() {
+        val v = playerControl ?: return
+        playerControlAutoClose.cancel()
+        (v.parent as? ViewGroup)?.removeView(v)
+        playerControl = null
+    }
+
+    /** 播放控制弹层的每秒刷新（由 [clockTick] 调用）。 */
+    private fun refreshPlayerControl() {
+        val v = playerControl ?: return
+        if (!::player.isInitialized) return
+        v.bind(
+            playing = player.isPlaying,
+            positionMs = player.currentPosition,
+            durationMs = player.duration,
+            lineIdx = player.currentLineIdx,
+            lineTotal = player.lineCount,
+            softDecode = player.isSoftDecode,
+            speedKBps = player.speedKBps,
+        )
+    }
+
+    // ======================= v1.9：点播自动连播（用户需求 3） =======================
+
+    /** 「播完才算数」的最短播放时长：低于它就判为线路异常，不连播（防止坏线路连跳一整个分组）。 */
+    private val MIN_AUTO_NEXT_PLAY_MS = 15_000L
+
+    /**
+     * 点播内容播完 → 自动接下一个。
+     *
+     * 触发点是 [PlayerController.onEnded]（`STATE_ENDED`）—— **直播永远不会到 ENDED**，
+     * 所以这个回调本身就已经是"这是个能播完的点播内容"的判据，不需要再去猜源的类型。
+     *
+     * 顺序（用户要求"一个视频播完自动接下一个，同分组播完接下一分组"）：
+     *   同分组下一个 → 组末则下一分组的第一个 → 已经是最后一组最后一个则停止（不回头循环）。
+     */
+    private fun onPlaybackEnded() {
+        if (!Prefs.iptvAutoPlayNext(this)) {
+            UiLog.i("播放", "点播播完：自动连播已关闭，不接下一集")
+            return
+        }
+        val cur = currentChannel ?: return
+
+        // 去抖：播放器切换状态时可能连发多次 ENDED，3 秒内只认一次
+        val now = SystemClock.uptimeMillis()
+        if (now - lastAutoNextAt < 3_000L) return
+        // 只播了几秒就到"播完" → 基本是坏线路，不是真的看完
+        val played = now - channelStartedAt
+        if (channelStartedAt > 0L && played < MIN_AUTO_NEXT_PLAY_MS) {
+            UiLog.i("播放", "点播播完：本次仅 ${played / 1000}s（<${MIN_AUTO_NEXT_PLAY_MS / 1000}s），判为线路异常，不连播")
+            return
+        }
+
+        val groups = groupList.groups
+        val gi = groups.indexOfFirst { g -> g.channels.any { it.name == cur.name } }
+        if (gi < 0) return
+        val list = groups[gi].channels
+        val ci = list.indexOfFirst { it.name == cur.name }
+
+        val next: Channel
+        val reason: String
+        if (ci >= 0 && ci + 1 <= list.lastIndex) {
+            next = list[ci + 1]
+            reason = "同分组下一个"
+        } else if (gi + 1 <= groups.lastIndex && groups[gi + 1].channels.isNotEmpty()) {
+            next = groups[gi + 1].channels[0]
+            reason = "下一分组第一个"
+        } else {
+            UiLog.i("播放", "点播播完：已是最后一组最后一个，停止连播")
+            return
+        }
+
+        lastAutoNextAt = now
+        UiLog.i("播放", "点播播完自动连播 → 《${next.name}》（$reason，第 ${gi + 1}/${groups.size} 组）")
+        Snackbar.show("自动连播：${next.name}", this)
+        jumpToChannel(next)
     }
 
     /** 「播放器自定义UA」录入（v1.8：原来那一行只能看不能改）。 */
@@ -2888,6 +3185,10 @@ class MainActivity : AppCompatActivity() {
     private fun showDlnaCast() {
         if (dlnaView != null) return
         if (::quickOp.isInitialized && quickOp.isOpen) quickOp.close()
+        // v1.10（用户需求 3）：投屏抽屉是全屏模态，三段式面板必须让位 ——
+        // 否则就是用户截图 IMG_9164 那样，面板在抽屉背后露着（而这张截图里的面板本身
+        // 又是"上一次点击落到 x<32% 分支"误唤出来的，见 onScreenTap 的注释）。
+        if (::panel.isInitialized && panel.visibility == View.VISIBLE) hidePanel()
         val view = DlnaCastView(this)
         dlnaView = view
         view.onClose = { closeDlnaCast() }
@@ -2898,9 +3199,12 @@ class MainActivity : AppCompatActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         view.bringToFront()
         view.render()
-        view.post { view.requestFocus() }
+        // v1.10（用户需求 1）：焦点必须落到**设备行**上，不能落到根覆盖层 ——
+        // 根节点虽然也是 focusable，但焦点停在它上面时遥控器要先按一次方向键才进得了列表。
+        view.post { runCatching { view.focusFirst() } }
         // 打开即搜索（原版 `LaunchedEffect { DlnaCastRepository.scan(context) }`）
         DlnaCastRepository.scan(this)
+        UiLog.i("投屏", "投屏抽屉已打开")
     }
 
     private fun closeDlnaCast() {
@@ -2908,19 +3212,27 @@ class MainActivity : AppCompatActivity() {
         (v.parent as? ViewGroup)?.removeView(v)
         dlnaView = null
         DlnaCastRepository.onChanged = null
+        UiLog.i("投屏", "投屏抽屉已关闭")
     }
 
     /** 选中设备：已投送同一台 → 断开；否则投送当前频道。 */
     private fun onDlnaDeviceSelected(device: DlnaDevice) {
         val view = dlnaView ?: return
+        // v1.10（用户需求 1）：投送中屏蔽重复点击（对应原版 isBusyProvider）。
         view.setBusy(true)
+
         if (DlnaCastRepository.castingDeviceId == device.id) {
+            UiLog.i("投屏", "停止投送 → ${device.displayName}")
             DlnaCastRepository.stop(device) { ok ->
+                if (dlnaView !== view) return@stop
                 view.setBusy(false)
+                view.render()
+                UiLog.i("投屏", if (ok) "已停止投送：${device.displayName}" else "停止投送失败：${device.displayName}")
                 Snackbar.show(if (ok) "已停止投送" else "停止投送失败", this)
             }
             return
         }
+
         val ch = currentChannel
         if (ch == null) {
             view.setBusy(false)
@@ -2928,14 +3240,21 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val idx = if (::player.isInitialized) player.currentLineIdx else 0
+        UiLog.i("投屏", "开始投送 → ${device.displayName}（频道=${ch.name} 线路=${idx + 1}）")
         DlnaCastRepository.cast(device, ch, idx) { result ->
+            if (dlnaView !== view) return@cast
             view.setBusy(false)
             view.render()
             result.onSuccess {
+                // v1.10（用户需求 1）：**投送成功才关抽屉** ——
+                // 失败时保持打开并给出原因，用户可以直接改选别的设备重试，
+                // 不用像以前那样「抽屉莫名消失、不知道成没成、只能重新进一遍」。
+                UiLog.i("投屏", "投送成功：${device.displayName}")
                 closeDlnaCast()
                 Snackbar.show("已投送到 ${device.displayName}", this)
-            }.onFailure {
-                Snackbar.show("投送失败：${it.message ?: "请重试"}", this)
+            }.onFailure { e ->
+                UiLog.w("投屏", "投送失败：${device.displayName}｜${e.message}")
+                Snackbar.show("投送失败：${e.message ?: "请重试"}", this)
             }
         }
     }
@@ -3109,6 +3428,8 @@ class MainActivity : AppCompatActivity() {
         channelIdx = idx
         if (currentChannel == ch) return
         currentChannel = ch
+        // v1.9（用户需求 3）：记下起播时刻 —— 点播播完是否算"真的看完"要靠它判定
+        channelStartedAt = SystemClock.uptimeMillis()
         rememberLastChannel()   // 判据 5：只在这里（真的换台）落库，避免每次焦点移动都写盘
         bottomTitle.text = ch.name
         // 问题 5：右上角 / 左下角台标也要优先用**源自带的 tvg-logo**，

@@ -59,6 +59,8 @@ class GroupManageView(context: Context) : FrameLayout(context) {
         setBackgroundColor(0xCC000000.toInt())
         isFocusable = true
         isFocusableInTouchMode = true
+        // v1.10：子视图优先取焦（见本 init 末尾的注释 ②）
+        descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
 
         val panel = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -96,6 +98,23 @@ class GroupManageView(context: Context) : FrameLayout(context) {
         })
         // 面板本身只占一部分高度，留出上方画面
         (panel.layoutParams as LayoutParams).height = (resources.displayMetrics.heightPixels * 0.72f).toInt()
+
+        // ---------------------------------------------------------------------------
+        // v1.10：两处补齐，都与「点一下行没反应 / 弹层莫名不见」有关。
+        //
+        // ① 点遮罩空白 = 关闭，**必须由本类根节点自己处理**。
+        //    原先这个动作在宿主 `MainActivity.onScreenTap`（`if (groupManageView != null)
+        //    closeGroupManage()`）。但 `dispatchTouchEvent` 是"先喂手势检测、再派发进 View 树"，
+        //    点行时 ACTION_UP 一进来整个抽屉就被移除，ViewGroup 的触摸目标链随之清空
+        //    → 行的 onClick 永远不触发，用户看到的就是"抽屉关了但什么都没发生"。
+        //    现在宿主那边只 `return`，关闭交给这里。
+        //
+        // ② `descendantFocusability` 设成子视图优先 —— 与 EpgSourceView / LinePickerView
+        //    同一条约定，否则行的 requestFocus() 会被本根节点截胡，遥控器要按一次方向键
+        //    才进得了列表。
+        // ---------------------------------------------------------------------------
+        setOnClickListener { onClose?.invoke() }
+        panel.setOnClickListener { /* 吃掉点击，避免点到面板本体时把抽屉一起关掉 */ }
     }
 
     /** 打开（或重绘）抽屉。[provider] 每次渲染都重新调用，切换后即可看到最新状态。 */

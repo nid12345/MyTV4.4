@@ -1384,3 +1384,100 @@ SHA-256 `02e143e8…f7c2`，可直接覆盖安装）+ `dist/MyTV-Legacy-v1.2-deb
 - `dist/MyTV4.4-v1.8-legacy13.apk`（release 10,309,498 B，MD5 `71c8e01bad24c1e13a9eb53f5464977f`）
 - `dist/MyTV4.4-v1.8-legacy13-debug.apk`（debug 17,051,045 B，MD5 `c9c4db2a569712cd078a13d76e5fdd45`）
 - `update/version.json` → v1.8 清单
+
+---
+
+## 2026-10-10 · v1.9 + v1.10（versionCode 14→15，tag `v1.10`）
+
+v1.9 的 6 项与 v1.10 的 3 项**合并为一次发布**（v1.9 只做了实现与实测，未单独出包）。
+
+### v1.9 六项需求
+
+1. **内置节目源没法在设置里切换** → 设置 → 节目单 新增「节目单来源」行，写
+   `EPG_SOURCE_CURRENT`；配合 `rememberFocus()` / `restoreContentFocus()` 让光标停在原处。
+2. **「界面 → 时间显示」开关不生效** → `topTime` 只在"整块"状态下显示；收起态把显示与否
+   交给 `DatetimeView` 按 `UiTimeShowMode`（隐藏/常显/整点显隐/半点显隐）决定。
+3. **点播源不自动连播** → `player.onEnded` → `onPlaybackEnded()`：同分组接下一个视频，
+   同分组播完接下一个分组。
+4. **左右滑方向不符直觉** → `changeLineBy(if (dx > 0) -1 else +1)`，
+   即**左滑 = 下一条、右滑 = 上一条**（遥控器左右键语义未动，用户只提了手势）。
+5. **播放控制加进度条 + 多线路改右侧选框** → `ui/player/PlayerControlView.kt`（可拖动
+   `SeekBar` + 播放/暂停 + 快退/快进 30 秒 + 多线路入口）；
+   `ui/player/LinePickerView.kt`（屏幕右侧竖排面板，列出同频道全部线路与地址、当前在用标记）。
+6. **多次换源后画面卡死** → 看门狗：`看门狗布防：23000ms 内需出画面，否则自愈` →
+   `自动换线路 → n/N`；仍不出画面则重连，不用退出应用。
+
+### v1.10 三项需求
+
+1. **投屏点一次才选中 / 不显示投没投成功** → `onDlnaDeviceSelected()` 改为
+   「**成功才关抽屉**」：`DlnaCastRepository.cast(...)` 的 `onSuccess` 里才 `closeDlnaCast()`
+   + Snackbar「已投送到 xxx」；`onFailure` 留在面板上并提示失败原因。
+   另加 `view.setBusy(true/false)` + `if (dlnaView !== view) return@cast` 防陈旧回调。
+2. **左侧菜单与长按菜单同时显示（IMG_9161）** → `showPanel()` 与 `showQuickMenu()` **互斥**，
+   约定"谁后开谁负责把对方关掉"。实测日志：
+   `hidePanel 触发 可见=0 来自 MainActivity.showQuickMenu:1597`。
+3. **投屏时点开会唤起左侧菜单（IMG_9164）** → `onScreenTap` 守卫链补齐：
+   `groupManageView / dlnaView / epgSourceView / updateProgress / settings.isOpen / quickOp.isOpen`
+   在屏时一律只 `return`，不做任何动作。实测：投屏抽屉在屏时点左侧 `(100,360)`
+   → `顶层=DlnaCastView`、只触发「开始搜索投屏设备…」，**没有** `面板唤出`。
+
+### 根因：三个症状是同一条链
+
+`dispatchTouchEvent` 是「**先把事件喂给手势检测、再派发进 View 树**」：
+
+1. 双击投屏设备行的**第一次** ACTION_UP 进 `onScreenTap` → 旧代码立刻 `closeDlnaCast()`
+   把整个抽屉移除 → 紧接着 `super.dispatchTouchEvent` 时 ViewGroup 的触摸目标链已被清空
+   → **行的 onClick 永远不触发**：抽屉没了、也没投上（症状 1）。
+2. 第二次点击时 `dlnaView != null` 已不成立 → 落到 `x < 32%` 分支 → **唤出左侧面板**（症状 3）。
+3. 快捷菜单按钮在左下角（x 小），点它同样落进上面那条分支 → `showPanel()`，
+   而 `showQuickMenu()` 当时不关面板 → **两个界面同时挂在屏上**（症状 2）。
+
+### 顺带修掉的真实缺陷（**v1.9 就已存在**）
+
+**覆盖层「点空白关闭」在 v1.9 是坏的。** 原先指望覆盖层根节点的 `setOnClickListener`，
+实测在全屏沉浸式窗口下**根本不触发**（同一屏里列表行能收到点击，根节点收不到）。
+证据：诊断日志 `触摸：onScreenTap(600,150) 顶层=DlnaCastView[0,0,1280,720]` 之后
+抽屉并没有关。统一改法：在手势阶段按**几何判定** `isInContent(x,y)`
+（`LinePickerView` / `PlayerControlView` / `DlnaCastView` 各实现一份，取 `panel.getGlobalVisibleRect`），
+命中外部才 `rootView.post { close }` 延到下一轮再移除视图。
+
+### 实测（emulator-5554，API 19，1280×720）
+
+五个弹层「点内部保留 / 点外部关闭」逐一验证（用 `顶层=` 诊断日志做前后状态对比）：
+
+| 弹层 | 内点保留 | 外点关闭 |
+|---|---|---|
+| 投屏抽屉（`DlnaCastView`） | ✔ | ✔ |
+| 多线路选框（`LinePickerView`） | ✔ | ✔ |
+| 播放控制（`PlayerControlView`） | ✔ | ✔ |
+| 分组管理 / 节目单来源 | ✔ | ✔ |
+
+其余复核：
+- 互斥：`hidePanel 触发 可见=0 来自 MainActivity.showQuickMenu:1597` ✔
+- 投屏抽屉在屏时点左侧不出面板 ✔
+- 投屏一次点击即响应当前设备行：连点两次仍是「开始搜索投屏设备…」、抽屉不消失 ✔
+- 多线路选框：`多线路选框已弹出（共 5 条，当前第 2 条）`，切线路 → `手动切线路 → 3/5` ✔
+- 播放控制：`播放控制弹层已弹出（点播·可拖动进度条，时长=25000ms）` ✔
+
+### 本轮踩到的坑（复用结论）
+
+- **API 19 的 `input keyevent --longpress` 可用**，能精确触发 `Keys.dispatch` 里
+  `repeatCount == 1` 的长按分支（`长按 key=DPAD_RIGHT action=LONG_RIGHT`）。
+  长按右键 = 多线路选框，长按下键 = 播放控制，MENU 键 = 快捷菜单。
+- **`adb shell input` 后的 `logcat -s 'MyTVLegacy:*'` 偶发整段为空**：
+  先用 `grep -c '左下信息块'` 确认日志通道有没有数据，再判断"没反应"是不是真的没触发。
+- `uiautomator dump` 在本工程基本不可用（底栏每 0.5s 刷新 + `QuickOpView` 的 `Breathe`
+  无限动画 → `could not get idle state`），**验证统一走 logcat 探针 + 点击前后 `顶层=` 对比**。
+- **`setSplitTrack` 是 API 21+**：`SeekBar.setSplitTrack()` 在 API 19 上会
+  `NoSuchMethodError` 崩在 `PlayerControlView.<init>`。`assembleDebug` **不跑 lint**，
+  API 21+ 调用能编过、运行时才崩 —— 判断 API 19 兼容性要用
+  `javap -classpath <sdk>/platforms/android-19/android.jar <类名>`。
+- 光标的「投屏成功后才关抽屉」路径在模拟器上**无法端到端实测**
+  （虚拟网络里没有任何 UPnP 设备，`DlnaDiscovery` 恒为 0 台），
+  只做了逻辑验证：`onSuccess` 里唯一的副作用就是 `closeDlnaCast()`。
+
+### 产物（v1.10，versionCode 15）
+
+- `dist/MyTV4.4-v1.10-legacy15.apk`（release 10,329,150 B，MD5 `2ebd2ecb0c527b5c610ca4166368d03d`）
+- `dist/MyTV4.4-v1.10-legacy15-debug.apk`（debug）
+- `update/version.json` → v1.10 清单

@@ -16,12 +16,16 @@ android {
         // M0：34 -> 28。IPTV 源大量是 http 明文，targetSdk >= 28 时 API 28+ 设备默认禁明文；
         //      设备本身是 API 19 不受影响，但降到 28 后在新设备上调试不会被拦。
         targetSdk = 28
-        // v1.8：设置页重排 + 更新链路进度提示 + 节目单管理 + 手势线路循环。
+        // v1.9：节目单来源可在设置页直接切换 + 时间显示生效 + 点播自动连播 +
+        //       手势方向对调 + 播放控制进度条 + 多线路右侧选框 + 换源卡死自愈。
+        // v1.10：投屏一次点击即选中、成功后才关抽屉并给出成败反馈；
+        //        左侧三段式面板与长按快捷菜单互斥；投屏抽屉在屏时不再误唤面板；
+        //        三个底部抽屉（投屏 / 节目单来源 / 分组管理）的遮罩点击不再吞掉列表行的 onClick。
         // ⚠️ 与 App.kt 的 BuildConfigCompat 必须一致：
         //     versionCode ↔ VERSION_CODE（升级通道用它比大小）
         //     versionName ↔ VERSION_NAME
-        versionCode = 13
-        versionName = "1.8-legacy.13"
+        versionCode = 15
+        versionName = "1.10-legacy.15"
         vectorDrawables { useSupportLibrary = true }
         // minSdk < 21 时 core library desugaring 强制要求 multidex
         multiDexEnabled = true

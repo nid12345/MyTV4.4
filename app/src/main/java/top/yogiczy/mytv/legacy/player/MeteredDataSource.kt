@@ -76,6 +76,14 @@ object NetMeter {
             points.addLast(Point(SystemClock.elapsedRealtime(), totalBytes))
         }
     }
+
+    /**
+     * 累计读到的总字节数（自进程启动起，不随窗口滑动清零）。
+     *
+     * v1.9 用途：播放卡死看门狗 —— 记下 prepare 时的值，过一段时间再比一次，
+     * **一个字节都没涨**才判定为真卡死（只靠 playbackState 会把"慢但在下数据"误判成卡死）。
+     */
+    fun total(): Long = synchronized(this) { totalBytes }
 }
 
 /**

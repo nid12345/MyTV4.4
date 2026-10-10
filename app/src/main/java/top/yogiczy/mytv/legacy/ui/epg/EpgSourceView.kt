@@ -102,6 +102,18 @@ class EpgSourceView(context: Context) : FrameLayout(context) {
         })
         (panel.layoutParams as LayoutParams).height =
             (resources.displayMetrics.heightPixels * 0.66f).toInt()
+
+        // ---------------------------------------------------------------------------
+        // v1.10：点遮罩空白 = 关闭抽屉，**必须由本类根节点自己处理**。
+        //
+        // 原先这个动作放在宿主 `MainActivity.onScreenTap` 里（`if (epgSourceView != null)
+        // closeEpgSourceManage()`）。但 `dispatchTouchEvent` 是"先喂手势检测、再派发进 View 树"，
+        // 于是点列表行时 ACTION_UP 一进来整个抽屉就被移除，ViewGroup 的触摸目标链随之清空
+        // → 行的 onClick 永远不触发（点一下只是抽屉消失了，什么都没发生）。
+        // 现在宿主那边只 `return`，关闭交给这里。
+        // ---------------------------------------------------------------------------
+        setOnClickListener { onClose?.invoke() }
+        panel.setOnClickListener { /* 吃掉点击，避免点到面板本体时把抽屉一起关掉 */ }
     }
 
     fun show(provider: () -> List<Row>) {

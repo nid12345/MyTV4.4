@@ -2,6 +2,8 @@ package top.yogiczy.mytv.legacy.player
 
 import android.content.Context
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.view.SurfaceView
 import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.ExoPlayer
@@ -79,6 +81,14 @@ class PlayerController(private val context: Context) {
     var onStateChanged: ((Int) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
 
+    /**
+     * **播放到底**（v1.9，用户需求 3）。
+     *
+     * 只有点播才会到 [Player.STATE_ENDED]：直播 HLS 永远没有"播完"这一说。
+     * 所以这个回调本身就是"这是个能播完的点播内容"的信号 —— 宿主据此连播下一个。
+     */
+    var onEnded: (() -> Unit)? = null
+
     /** 显示比例实际生效后回调（M8 的「显示模式」菜单用来回显当前项）。 */
     var onDisplayModeApplied: ((VideoPlayerDisplayMode) -> Unit)? = null
 
@@ -98,6 +108,8 @@ class PlayerController(private val context: Context) {
         override fun onPlaybackStateChanged(state: Int) {
             if (state == Player.STATE_READY) {
                 fallbackCount = 0
+                // v1.9：真正出画面了才撤销看门狗（否则每次 prepare 都会挂一条超时任务）
+                cancelStallWatchdog()
                 val vs = exoPlayer.videoSize
                 if (vs.width > 0 && vs.height > 0) {
                     videoW = vs.width
@@ -106,6 +118,11 @@ class PlayerController(private val context: Context) {
                     applyDisplayMode()
                 }
                 UiLog.i(TAG, "播放就绪 视频尺寸=${vs.width}x${vs.height} 容器=${surfaceView?.width}x${surfaceView?.height}")
+            }
+            // v1.9（用户需求 3）：点播播完 —— 直播不会走到这里
+            if (state == Player.STATE_ENDED) {
+                UiLog.i(TAG, "播放到底（点播内容播完）→ 通知宿主连播")
+                onEnded?.invoke()
             }
             onStateChanged?.invoke(state)
         }
@@ -382,6 +399,130 @@ class PlayerController(private val context: Context) {
     private fun currentUri(): Uri? =
         runCatching { exoPlayer.currentMediaItem?.localConfiguration?.uri }.getOrNull()
 
+    // ---------------- v1.9：卡死看门狗（用户需求 6） ----------------
+
+    /**
+     * 「多次换源后偶然卡住、怎么切都不动、必须退出重进」的兜底自愈（用户需求 6）。
+     *
+     * -----------------------------------------------------------------------
+     * 为什么会卡死：换线路走的是 `stop() → clearMediaItems() → setMediaSource() → prepare()`
+     * 这一串**都是异步**的。播放器内部还有自己的加载线程与解码器。若某次 prepare 之后
+     * 加载线程没能起来（HTTP 连接半死不活、MediaCodec 申请失败但没抛错、上游一直不回数据），
+     * 播放器就永远停在 `STATE_BUFFERING/IDLE`：
+     *   · 画面是上一帧，看着像"卡住"；
+     *   · 再点切换，仍然只是往同一个卡住的加载线程里塞新地址 → 还是不动；
+     *   · 只有 `release()` 重造一台才能好 —— 这正是用户说的"退出重进才行"。
+     *
+     * 所以这里加一层**看门狗**：每次 prepare 后布防，到点检查
+     * 「没到 READY **且** 一个字节都没下下来」→ 判定卡死，**就地重建播放器**（不需要退出应用）。
+     * 重建两次仍然不行才降级换下一条线路。
+     *
+     * 判定为什么用"新增字节数"而不是只看状态：直播流合法地长时间 BUFFERING 是常态
+     * （老盒子起播慢），只看状态会把"慢"误判成"死"。真卡死时是最彻底的静默 —— 零字节。
+     * -----------------------------------------------------------------------
+     */
+    private val watchdogHandler = Handler(Looper.getMainLooper())
+
+    /** 布防时刻的累计下载字节（[NetMeter.total]），用于判断"有没有在动"。 */
+    private var stallBaselineBytes = 0L
+
+    /** 「还在下数据但没就绪」只宽限一次，避免慢源被无限宽限。 */
+    private var stallRounds = 0
+
+    /** 本次 prepare 已经就地重建过几次播放器。 */
+    private var stallRecoveries = 0
+
+    private val stallWatchdog = Runnable { checkStall() }
+
+    private fun armStallWatchdog() {
+        watchdogHandler.removeCallbacks(stallWatchdog)
+        stallBaselineBytes = NetMeter.total()
+        stallRounds = 0
+        val timeout = Prefs.videoPlayerLoadTimeout(context) + 8_000L
+        watchdogHandler.postDelayed(stallWatchdog, timeout)
+        UiLog.d(TAG, "看门狗布防：${timeout}ms 内需出画面，否则自愈")
+    }
+
+    private fun cancelStallWatchdog() {
+        watchdogHandler.removeCallbacks(stallWatchdog)
+        stallRounds = 0
+        stallRecoveries = 0
+    }
+
+    private fun checkStall() {
+        val state = runCatching { exoPlayer.playbackState }.getOrDefault(Player.STATE_IDLE)
+        if (state == Player.STATE_READY) return          // 已就绪（READY 时已撤销，双保险）
+
+        val downloaded = NetMeter.total() - stallBaselineBytes
+        if (downloaded > 0L && stallRounds == 0) {
+            stallRounds = 1
+            stallBaselineBytes = NetMeter.total()
+            watchdogHandler.postDelayed(stallWatchdog, 20_000L)
+            UiLog.i(TAG, "看门狗：仍在下载（state=$state 新增=${downloaded}B）→ 只是慢，再等 20 秒")
+            return
+        }
+
+        stallRecoveries++
+        UiLog.w(
+            TAG,
+            "看门狗：判定卡死（state=$state 新增=${downloaded}B）第 $stallRecoveries 次 → 就地重建播放器"
+        )
+        if (stallRecoveries <= 2) {
+            hardRecover()
+        } else {
+            stallRecoveries = 0
+            if (urlIdx + 1 < urlQueue.size) {
+                urlIdx++
+                fallbackCount++
+                UiLog.i(TAG, "看门狗：重建无效 → 降级到线路 ${urlIdx + 1}/${urlQueue.size}")
+                onLineChanged?.invoke(urlIdx, urlQueue.size, urlQueue[urlIdx])
+                openCurrent()
+            } else {
+                UiLog.e(TAG, "看门狗：全部线路均无数据")
+                onError?.invoke("线路长时间无数据（已尝试自动恢复）")
+            }
+        }
+    }
+
+    /**
+     * 就地重建播放器（不换线路、不动 urlQueue）。
+     *
+     * 与 [reinitPlayer] 的区别：这里**强制回到硬解**并从当前线路重新起播 ——
+     * 卡死时软解往往是元凶（老盒子软解 1080p 会直接喂不上帧）。
+     */
+    private fun hardRecover() {
+        val url = urlQueue.getOrNull(urlIdx) ?: return
+        runCatching {
+            exoPlayer.removeListener(listener)
+            exoPlayer.release()
+        }.onFailure { UiLog.e(TAG, "看门狗：释放旧播放器失败", it) }
+
+        httpFactory = newHttpFactory()
+        dataSourceFactory = newDataSourceFactory()
+        softDecodeUsed = false                 // 卡死多半来自软解，重建时回到硬解优先
+        exoPlayer = buildPlayer(softDecode = false)
+        surfaceView?.let { exoPlayer.setVideoSurfaceView(it) }
+        contentTypeAttempts.clear()
+        liveSeekRetried = false
+        fallbackCount = 0
+
+        UiLog.i(TAG, "看门狗：播放器已重建，重新打开线路 ${urlIdx + 1}/${urlQueue.size}")
+        NetMeter.reset()
+        prepareUri(Uri.parse(url.let { if (it.endsWith("?")) "${it}t" else it }), null)
+    }
+
+    /** 供宿主判断"当前播放器是不是还活着"（调试叠加层用）。 */
+    val playbackStateName: String
+        get() = runCatching {
+            when (exoPlayer.playbackState) {
+                Player.STATE_IDLE -> "IDLE"
+                Player.STATE_BUFFERING -> "BUFFERING"
+                Player.STATE_READY -> "READY"
+                Player.STATE_ENDED -> "ENDED"
+                else -> "?"
+            }
+        }.getOrDefault("-")
+
     // ---------------- 播放控制 ----------------
 
     fun attach(surfaceView: SurfaceView) {
@@ -419,6 +560,12 @@ class PlayerController(private val context: Context) {
         }
         urlIdx = startIdx.coerceIn(0, urlQueue.lastIndex)
         fallbackCount = 0
+        // v1.9（用户需求 6）：换频道/换源时把"一次性恢复标记"全部复位。
+        // 不复位的话，上一条线路用掉的「归位重试」「容器改试」会**跨线路**留着，
+        // 新线路的第一次失败就直接被判为"已重试过"→ 立刻降级，看起来就是"切了不动"。
+        liveSeekRetried = false
+        contentTypeAttempts.clear()
+        stallRecoveries = 0
         UiLog.i(TAG, "开始播放：共 ${urlQueue.size} 条线路，从第 ${urlIdx + 1} 条起")
         onLineChanged?.invoke(urlIdx, urlQueue.size, urlQueue[urlIdx])
         openCurrent()
@@ -429,6 +576,10 @@ class PlayerController(private val context: Context) {
         if (idx !in urlQueue.indices) return
         urlIdx = idx
         fallbackCount = 0
+        // 同上：手动切线路 = 用户明确要求重开，一次性标记必须复位
+        liveSeekRetried = false
+        contentTypeAttempts.clear()
+        stallRecoveries = 0
         UiLog.i(TAG, "手动切线路 → ${idx + 1}/${urlQueue.size}")
         onLineChanged?.invoke(urlIdx, urlQueue.size, urlQueue[urlIdx])
         openCurrent()
@@ -436,6 +587,9 @@ class PlayerController(private val context: Context) {
 
     val currentLineIdx: Int get() = urlIdx
     val lineCount: Int get() = urlQueue.size
+
+    /** 当前频道的全部线路地址（v1.9：「多线路」选框要展示它们）。 */
+    val lineUrls: List<String> get() = urlQueue
 
     /**
      * 当前线路的**实时网速**（KB/s），供底栏角标与频道信息块使用（对齐原版 `ChannelInfo`）。
@@ -479,6 +633,10 @@ class PlayerController(private val context: Context) {
             UiLog.e(TAG, "线路打开失败", it)
             onError?.invoke("线路打开失败：${it.message}")
         }
+
+        // v1.9（用户需求 6）：布防卡死看门狗 —— 起播失败的收尾不再只有"记一条日志"，
+        // 到点会自动重建播放器恢复。
+        armStallWatchdog()
     }
 
     private fun buildMediaSource(uri: Uri, contentType: Int): MediaSource? {
@@ -565,7 +723,39 @@ class PlayerController(private val context: Context) {
     fun pause() = exoPlayer.pause()
     fun stop() = runCatching { exoPlayer.stop() }.getOrNull()
 
+    /** 是否正在播放（「播放控制」回显用）。 */
+    val isPlaying: Boolean
+        get() = runCatching { exoPlayer.isPlaying }.getOrDefault(false)
+
+    /**
+     * 是否直播。
+     *
+     * 判据用「时长未知」而不是 `isCurrentMediaItemLive`：
+     * 后者在 ExoPlayer 2.18.1 上对**加载中/报错**的项会给出误导性的结果，
+     * 而「拿不到时长」在所有直播形态（HLS 直播、RTSP、rtp）上都成立，
+     * 且点播一旦就绪必然有 duration —— 这条判据对 UI 的"能不能拖"来说更可靠。
+     */
+    val isLive: Boolean
+        get() = duration <= 0L
+
+    /** 绝对定位（毫秒）。直播未就绪时静默忽略，不抛。 */
+    fun seekTo(positionMs: Long) {
+        if (positionMs < 0L) return
+        runCatching { exoPlayer.seekTo(positionMs) }
+            .onFailure { UiLog.w(TAG, "seek 失败：${it.message}") }
+    }
+
+    /** 相对跳转（毫秒，负数=后退）。会夹到 `[0, duration]` 区间内。 */
+    fun seekBy(deltaMs: Long) {
+        val dur = duration
+        val target = (currentPosition + deltaMs).let { t ->
+            if (t < 0L) 0L else if (dur > 0L && t > dur) dur else t
+        }
+        seekTo(target)
+    }
+
     fun release() {
+        cancelStallWatchdog()
         runCatching {
             exoPlayer.removeListener(listener)
             exoPlayer.release()

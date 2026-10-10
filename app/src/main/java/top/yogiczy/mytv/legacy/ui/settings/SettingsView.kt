@@ -61,6 +61,9 @@ class SettingsView(context: Context) : LinearLayout(context) {
 
     /** 问题 7：「自定义节目单」（1.7 里打开 EpgSourceScreen；v1.8 改为节目单管理抽屉）。 */
     var onCustomEpg: (() -> Unit)? = null
+
+    /** v1.9（用户需求 1）：设置页里直接切换了节目单来源 → 宿主需要按新源重拉节目单。 */
+    var onEpgSourceChanged: ((top.yogiczy.mytv.legacy.data.EpgSource) -> Unit)? = null
     var onCheckUpdate: (() -> Unit)? = null
     var onPackages: (() -> Unit)? = null
     var onResetAll: (() -> Unit)? = null
@@ -256,6 +259,33 @@ class SettingsView(context: Context) : LinearLayout(context) {
         return contentColumn.indexOfChild(f)
     }
 
+    /** v1.9：上一次停留的右栏行号（打开子抽屉前记下，关掉抽屉后搬回去）。 */
+    private var lastContentIdx = -1
+
+    /**
+     * v1.9（用户需求 1）：记下"当前这一行"。宿主在弹出子抽屉（节目单管理 / 分组管理）**之前**调用。
+     *
+     * 为什么需要它：子抽屉是加到 rootView 最上层的新 View，抽屉被移除时系统会把焦点交给
+     * 窗口里第一个可聚焦视图 —— 也就是左栏第一项「关于」→ 设置页看起来"自己跳回关于了"，
+     * 用户以为刚才那一下没生效。
+     */
+    fun rememberFocus() {
+        val i = focusedContentIndex()
+        if (i >= 0) lastContentIdx = i
+    }
+
+    /** 把焦点搬回 [rememberFocus] 记下的那一行（子抽屉关闭后调用）。 */
+    fun restoreContentFocus() {
+        val i = lastContentIdx
+        if (i < 0 || i >= contentColumn.childCount) {
+            catColumn.getChildAt(selected)?.requestFocus()
+            return
+        }
+        if (!contentColumn.getChildAt(i).requestFocus()) {
+            catColumn.getChildAt(selected)?.requestFocus()
+        }
+    }
+
     /** 按 [selected] 重建右栏（只由 [renderContent] 调用，保证不重入）。 */
     private fun renderContentOnce() {
         val keepFocusIdx = focusedContentIndex()
@@ -270,7 +300,8 @@ class SettingsView(context: Context) : LinearLayout(context) {
             SettingsCategory.IPTV -> SettingsCats.iptv(ctx,
                 { onCustomSource?.invoke() }, { onGroupManage?.invoke() },
                 { onGroupManageAll?.invoke() })
-            SettingsCategory.EPG -> SettingsCats.epg(ctx) { onCustomEpg?.invoke() }
+            SettingsCategory.EPG -> SettingsCats.epg(
+                ctx, { onCustomEpg?.invoke() }, { onEpgSourceChanged?.invoke(it) })
             // 问题 8（用户要求）：整个「预约」分类已删除（连同 EpgReserveView 接线）
             SettingsCategory.UI -> SettingsCats.ui(ctx)
             SettingsCategory.FAVORITE -> {

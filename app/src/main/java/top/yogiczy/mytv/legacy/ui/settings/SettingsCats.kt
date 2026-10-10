@@ -107,7 +107,11 @@ object SettingsCats {
     }
 
     // ---------- 4 节目单 ----------
-    fun epg(ctx: Context, onCustomEpg: () -> Unit): List<SettingsItemView> {
+    fun epg(
+        ctx: Context,
+        onCustomEpg: () -> Unit,
+        onEpgSourceChanged: (top.yogiczy.mytv.legacy.data.EpgSource) -> Unit,
+    ): List<SettingsItemView> {
         val enable = row(ctx, "节目单启用", "首次加载时可能会较为缓慢")
         enable.setSwitch(Prefs.epgEnable(ctx)) { Prefs.setEpgEnable(ctx, it) }
         val threshold = row(
@@ -120,11 +124,46 @@ object SettingsCats {
             Prefs.setEpgRefreshTimeThreshold(ctx, next)
             threshold.setValue("$next 小时")
         }
+
+        // -------------------------------------------------------------------
+        // v1.9（用户需求 1）：「内置节目源没法在设置里切换，点了不能切换到」。
+        //
+        // 原来这里**只有一行**「自定义节目单」，值显示的是当前节目单地址，
+        // 点击只是弹出一个管理抽屉 —— **内置的 3 个节目单没有"切换"这个动作可点**，
+        // 抽屉里能切但用户预期的是"在设置里点一下就换"，于是体感就是"点了没反应"。
+        //
+        // 现在拆成两行，职责分明：
+        //   · 「节目单来源」= **点一下换下一个**（内置 3 个 + 自定义全部循环），
+        //     与「时间显示」「超时自动关闭」同一套交互，切完立刻重拉节目单；
+        //   · 「节目单管理」= 打开抽屉（新增 / 删除 / 指定切换）。
+        // -------------------------------------------------------------------
+        val allSources = ArrayList(top.yogiczy.mytv.legacy.data.Prefs.EPG_SOURCE_LIST)
+        allSources += top.yogiczy.mytv.legacy.data.Prefs.epgSourceList(ctx)
+        val distinct = allSources.distinctBy { it.url }
+        val cur = Prefs.epgSourceCurrent(ctx)
+
+        val source = row(
+            ctx, "节目单来源",
+            "点击切换到下一个（内置 ${top.yogiczy.mytv.legacy.data.Prefs.EPG_SOURCE_LIST.size} 个 + 自定义，共 ${distinct.size} 个）"
+        )
+        source.setValue(cur.name)
+        source.onClick = pick@{
+            val list = (top.yogiczy.mytv.legacy.data.Prefs.EPG_SOURCE_LIST +
+                    top.yogiczy.mytv.legacy.data.Prefs.epgSourceList(ctx)).distinctBy { it.url }
+            if (list.isEmpty()) return@pick
+            val i = list.indexOfFirst { it.url == Prefs.epgSourceCurrent(ctx).url }
+            val next = list[((if (i < 0) -1 else i) + 1) % list.size]
+            Prefs.setEpgSourceCurrent(ctx, next)
+            source.setValue(next.name)
+            top.yogiczy.mytv.legacy.core.UiLog.i("节目单", "设置页切换节目单：${next.name}")
+            onEpgSourceChanged(next)
+        }
+
         // 问题 7：原来这一行**没有任何 onClick**（点了没反应，与「自定义直播源」同一类问题）。
-        val custom = row(ctx, "自定义节目单", Prefs.epgSourceCurrent(ctx).url)
+        val custom = row(ctx, "节目单管理", "新增 / 删除节目单 · 当前：${cur.url}")
         custom.onClick = onCustomEpg
         custom.setTailIcon(top.yogiczy.mytv.legacy.R.drawable.ic_swap)
-        return listOf(enable, threshold, custom)
+        return listOf(enable, threshold, source, custom)
     }
 
     // ---------- 5 预约 ----------
