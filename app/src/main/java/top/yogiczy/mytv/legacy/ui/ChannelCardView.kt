@@ -104,7 +104,9 @@ class ChannelCardView(
 
         logo.apply {
             scaleType = ImageView.ScaleType.FIT_CENTER
-            setPadding(UiKit.dp(context, 2f), UiKit.dp(context, 2f), UiKit.dp(context, 2f), UiKit.dp(context, 2f))
+            // v1.15 需求 6：台标放大 40% 后（46→64dp）比行高（62dp）还高，
+            // 内边距跟着收到 0 —— 否则 FIT_CENTER 里再被 2+2dp 挤一次，等于白放大。
+            setPadding(0, 0, 0, 0)
         }
 
         val texts = LinearLayout(context).apply {

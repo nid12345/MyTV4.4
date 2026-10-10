@@ -79,7 +79,7 @@ class EpgSourceView(context: Context) : FrameLayout(context) {
             typeface = Typeface.DEFAULT_BOLD
         })
         panel.addView(TextView(context).apply {
-            text = "点击切换节目单 · 长按或按删除键移除自定义节目单 · 列表顶部为内置节目单"
+            text = "点击切换节目单 · 行尾「删除」或长按移除自定义节目单 · 列表顶部为内置节目单"
             setTextColor(Palette.onSurfaceVariant(context))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setPadding(0, s(4f), 0, s(10f))
@@ -190,7 +190,44 @@ class EpgSourceView(context: Context) : FrameLayout(context) {
             ellipsize = TextUtils.TruncateAt.END
         }
         item.addView(top)
-        item.addView(url)
+
+        // v1.15 需求 2（用户）：「同理节目单管理也添加一个能删除的选项」。
+        // 原来删除只能靠长按 / 删除键，用户找不到。现在给可删除的行加一个**显式的「删除」按钮**
+        // （可聚焦、可点按），与「添加自定义节目单」行对仗；内置行不显示。
+        if (row.deletable) {
+            val del = TextView(context).apply {
+                text = "删除"
+                setTextColor(Palette.error(context))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                gravity = Gravity.CENTER
+                isFocusable = true
+                isFocusableInTouchMode = true
+                setPadding(s(14f), s(6f), s(14f), s(6f))
+                background = UiKit.rounded(
+                    UiKit.withAlpha(Palette.surfaceVariant(context), 0.9f), 6f, context)
+            }
+            del.setOnFocusChangeListener { v, hasFocus ->
+                v.background = UiKit.rounded(
+                    if (hasFocus) Palette.onSurface(context)
+                    else UiKit.withAlpha(Palette.surfaceVariant(context), 0.9f),
+                    6f, context
+                )
+                (v as TextView).setTextColor(
+                    if (hasFocus) 0xFF410002.toInt() else Palette.error(context))
+            }
+            del.setOnClickListener { onDelete?.invoke(row.source) }
+            val bottom = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            bottom.addView(url, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            bottom.addView(del, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = s(10f) })
+            item.addView(bottom)
+        } else {
+            item.addView(url)
+        }
 
         item.setOnFocusChangeListener { _, hasFocus ->
             item.background = UiKit.rounded(

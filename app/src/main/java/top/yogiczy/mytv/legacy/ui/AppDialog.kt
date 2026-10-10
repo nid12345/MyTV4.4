@@ -104,6 +104,14 @@ object AppDialog {
         title: String,
         message: String,
         okLabel: String = "确定",
+        /**
+         * v1.15 需求 5：**删除类**确认框把默认焦点放到「取消」。
+         *
+         * 起因是实测踩到：删除订阅源时焦点默认落在「删除」上，按一下确认键就删了 ——
+         * 用户想"先看看"也会误删（我在验证时也真把一个内置源删掉了）。
+         * 危险动作给"取消"默认焦点是通行做法：多按一次方向键，换零误删。
+         */
+        focusOnCancel: Boolean = false,
         onCancel: () -> Unit,
         onOk: () -> Unit,
     ): Built {
@@ -125,7 +133,7 @@ object AppDialog {
 
         overlay.addView(panel, FrameLayout.LayoutParams(panelWidth(ctx), WRAP)
             .apply { gravity = Gravity.CENTER })
-        return Built(overlay, ok)
+        return Built(overlay, if (focusOnCancel) cancel else ok)
     }
 
     /**

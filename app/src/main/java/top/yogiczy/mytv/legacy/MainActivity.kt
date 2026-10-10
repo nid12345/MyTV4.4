@@ -76,6 +76,7 @@ import top.yogiczy.mytv.legacy.ui.player.PlayerControlView
 import top.yogiczy.mytv.legacy.ui.epg.EpgColumnView
 import top.yogiczy.mytv.legacy.ui.settings.SettingsView
 import top.yogiczy.mytv.legacy.ui.settings.GroupManageView
+import top.yogiczy.mytv.legacy.ui.settings.SourceManageView
 import top.yogiczy.mytv.legacy.ui.epg.EpgPanelView
 import top.yogiczy.mytv.legacy.ui.epg.EpgProgressView
 import top.yogiczy.mytv.legacy.ui.Density
@@ -341,28 +342,24 @@ class MainActivity : AppCompatActivity() {
      */
     private var loadingTip: LoadingTipView? = null
 
-    /** 正在加载 / 切换订阅源。期间右下角信息框一律不显示（用户要求"右下角先不要有弹窗"）。 */
+    /**
+     * 正在加载 / 切换订阅源。期间右下角信息框一律不显示（用户要求"右下角先不要有弹窗"）。
+     */
     private var sourceLoading = false
 
     /**
-     * 加载成功后把右下角信息框主动顶出来的截止时刻。
-     *
-     * 用户要求「加载成功后就消失，换底部详细信息的框弹出，以显示当前节目详情」——
-     * 但底栏原本只在"面板在屏"或"有状态消息"时才显示，刚加载完两者都不成立，
-     * 于是需要这个"主动保留窗口"把它撑出来（见 [refreshBottomVisibility]）。
+     * ⚠️ v1.14 曾有 `bottomHoldUntil` / `SOURCE_READY_INFO_MS`（加载成功後把右下角信息框
+     * 主动撑出来 6 秒）。**v1.15 需求 7 明确作废**：
+     *   「每次第一次进app的时候，右下角的那个框框没必要显现。去掉这个显示。
+     *     只显示左底部带logo的那个信息框就好了；同样的道理当换其他订阅源链接后，
+     *     右下角那个框框不用显示；因为显示的内容跟左下角带logo的那个信息框显示的
+     *     信息都一样没必要两个都显示」
+     * 右下角信息框现在只在**面板在屏**或**有粘性状态消息**时出现（见
+     * [refreshBottomVisibility]），换台/换源后由左下角 `tempInfoBar`（带台标）负责展示。
      */
-    private var bottomHoldUntil = 0L
-
-    private val bottomHoldExpire = Runnable {
-        bottomHoldUntil = 0L
-        refreshBottomVisibility()
-    }
 
     /** 切换源失败后红色提示停留多久再回退 —— 用户要求"三秒左右"。 */
     private val LOAD_FAIL_FALLBACK_MS = 3_000L
-
-    /** 加载成功后右下角信息框显示多久（给用户看清当前节目详情）。 */
-    private val SOURCE_READY_INFO_MS = 6_000L
 
     /** 显示「正在加载直播源」提示窗。[opaque] = true 时铺全屏黑（切换订阅源用）。 */
     private fun showLoadingTip(text: String, opaque: Boolean) {
@@ -405,6 +402,7 @@ class MainActivity : AppCompatActivity() {
         runCatching { closeLinePicker() }
         runCatching { closeDlnaCast() }
         runCatching { closeEpgSourceManage() }
+        runCatching { closeSourceManage() }
         runCatching { closeGroupManage() }
         runCatching { closeUpdateProgress() }
         runCatching { if (::epgPanel.isInitialized && epgPanel.isOpen) closeEpgPanel() }
@@ -442,6 +440,7 @@ class MainActivity : AppCompatActivity() {
         if (::settings.isInitialized && settings.isOpen) stack += settings
         groupManageView?.let { stack += it }
         epgSourceView?.let { stack += it }
+        sourceManageView?.let { stack += it }
         dlnaView?.let { stack += it }
         linePicker?.let { stack += it }
         playerControl?.let { stack += it }
@@ -935,9 +934,9 @@ class MainActivity : AppCompatActivity() {
     /** M9：设置改动后的应用（界面开关、台标、进度条等）。 */
     private fun applySettingsChanged() {
         runCatching {
-            // 常驻底部节目进度
-            epgProgress.visibility =
-                if (Prefs.uiShowEpgProgrammePermanentProgress(this)) View.VISIBLE else View.GONE
+            // v1.15 需求 3：「常驻底部节目进度」开关已删除 —— 常驻进度条改由
+            // renderEpgForCurrent() 里按「有当前节目」自动显隐，不再有手动开关。
+            renderEpgForCurrent()
             // 台标显示开关：重绘当前分组的中栏即可生效
             renderEpgForCurrent()
             refreshTopRight()
@@ -975,6 +974,12 @@ class MainActivity : AppCompatActivity() {
         if (epgSourceView != null) {
             cancelExitConfirm()
             closeEpgSourceManage()
+            return
+        }
+        // v1.15 需求 2：直播源管理弹窗（返回键关它）
+        if (sourceManageView != null) {
+            cancelExitConfirm()
+            closeSourceManage()
             return
         }
         // v1.9（用户需求 5）：播放控制弹层 / 多线路选框优先于面板
@@ -1078,12 +1083,23 @@ class MainActivity : AppCompatActivity() {
             onLeft = { onPanelLeft() },
             onRight = { onPanelRight() },
             onSettings = { onMenuKeyPlaceholder() },
-            // ⚠️ 问题 4：这里**故意不绑 onLongSelect**。
-            // 绑了的话，长按确认键会被 Keys 消费掉并唤出快捷功能菜单，而焦点项自己的
-            // 长按（频道项 = 收藏）由 View 的 CheckForLongPress 独立触发 ——
-            // 两者同时发生，用户看到的就是「长按收藏的同时又弹出设置菜单」。
-            // 不绑 → Keys.dispatch 对这个键完全没有回调，直接放行给 View 树，
-            // 短按 = 焦点项的 onClick（换台），长按 = 焦点项的长按（收藏），语义唯一。
+            // v1.15 需求 5：确认键的短按/长按**都**由这里接管，不再让 View 自己处理。
+            //
+            // 为什么必须连短按一起接管（实测踩到）：
+            // `View.onKeyDown` 对 DPAD_CENTER/ENTER 的处理是
+            // 「DOWN 时 `post(mPerformClick)` → 约 64ms 后 performClick()，UP 时 removeCallbacks」。
+            // **按住不放时那 64ms 的窗口早就过了**，于是长按还没触发，行先被点了一次
+            // （换源列表里就是"长按想删源，结果先切了源"→ 面板被收起 → 长按也就没了上下文）。
+            // 接管后短按在 UP 触发，长按在 repeatCount==1 触发，两者互不干扰。
+            onSelect = { onPanelSelect() },
+            // 历史：问题 4 时这里故意不绑，理由是「绑了会吃掉频道卡片的长按收藏」。
+            // 但 v1.15 实测发现那个理由站不住 —— **View 对确认键（DPAD_CENTER/ENTER）
+            // 的长按根本不会触发 `OnLongClickListener`**（`CheckForLongPress` 只在
+            // ACTION_DOWN 的**触摸**路径里 post，按键路径没有这段逻辑），
+            // 也就是说"长按 OK = 收藏"从来就没生效过。
+            // 现在绑上并在 [onPanelLongSelect] 里分流：换源列表 → 删除确认；
+            // 其余 → 手动 `performLongClick()` 交给焦点项自己，语义与当初"不绑"一致。
+            onLongSelect = { onPanelLongSelect() },
             onLongLeft = { onLongLeftPlaceholder() },
             onLongRight = { onLongRightPlaceholder() },
             // ⚠️ v1.13 需求 1：这里**故意不绑 onLongDown**（原来绑的是"长按下键 → 播放控制弹层"）。
@@ -1212,11 +1228,10 @@ class MainActivity : AppCompatActivity() {
         val next = if (now == null) null else list.firstOrNull { it.startAt >= now.endAt }
         showProgrammeInfo(now, next, ch)
         epgProgress.update(now)
-        // ⚠️ `EpgProgressView.update()` 只负责填内容、会无条件置 VISIBLE；而"常驻底部节目进度"
-        // 是个**设置项（默认关）**，可见性必须由设置项决定，否则面板收起后它一直挂在左下角。
-        epgProgress.setEnabledByPref(
-            now != null && Prefs.uiShowEpgProgrammePermanentProgress(this)
-        )
+        // v1.15 需求 3：原来这里还要看「常驻底部节目进度」设置项（默认关）才显示，
+        // 该设置项已整项删除。现在改成**有当前节目就显示**，节目单没到/没这个频道
+        // 的节目信息时自动收起 —— 与「频道项底部进度条」两个开关各管一处，不再叠加。
+        epgProgress.setEnabledByPref(now != null)
         refreshChannelProgrammes()   // 判据 3：中栏每行底部的"当前节目名 + 进度"
         refreshBottomVisibility()   // 判据 1
     }
@@ -1753,11 +1768,12 @@ class MainActivity : AppCompatActivity() {
         // 问题 1（用户）：收起动画期间不算"在屏"，右下角信息立即消失
         val panelVisible = ::panel.isInitialized &&
             panel.visibility == View.VISIBLE && !panelDismissing
-        // v1.14 需求 1：加载成功后主动把信息框撑开的窗口（原因见 bottomHoldUntil 的注释）。
-        val holdAlive = SystemClock.uptimeMillis() < bottomHoldUntil
+        // v1.15 需求 7：**不再**有"加载成功后主动撑出来"的窗口（v1.14 的 bottomHoldUntil 已作废）。
+        // 右下角信息框只在面板在屏或有状态消息时出现；换台/换源后的详情由左下角
+        // 带台标的 tempInfoBar 展示，避免两块内容重复。
         // v1.14 需求 1：加载 / 切换订阅源期间右下角一律不显示 ——
         // 用户原话「每次刚打开进入 app 的时候，右下角先不要有弹窗」。
-        val show = (panelVisible || statusAlive || holdAlive) && !sourceLoading
+        val show = (panelVisible || statusAlive) && !sourceLoading
         bottomBar.visibility = if (show) View.VISIBLE else View.GONE
         if (show && !bottomStatusSticky && bottomStatusUntil > 0L) {
             // v1.11：按**剩余时间**续期（原来写死 BOTTOM_STATUS_MS+80，长提示会被提前收掉）
@@ -1923,6 +1939,10 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onLongPress(e: MotionEvent) {
+                // v1.15 需求 5：面板里的「换源」列表上长按 = 删除该订阅源（保底源除外）。
+                // ⚠️ 必须在这里拦，理由见 handleSourceRowLongPress 的注释 ——
+                // 行的 setOnLongClickListener 在**触屏**路径上永远收不到。
+                if (handleSourceRowLongPress(e.x, e.y)) return
                 showQuickMenu()
             }
 
@@ -2184,6 +2204,8 @@ class MainActivity : AppCompatActivity() {
         quickOp.open(
             channelNumber = if (n > 0) n.toString() else "",
             sourceName = currentSourceName(),
+            // v1.15 需求 4：「收藏」按钮要反映**当前频道**的收藏状态
+            favorited = currentChannel?.let { Prefs.isFavorite(this, it.name) } ?: false,
         )
         refreshTopRight()
         // 问题 4：菜单里的频道信息块（带台标）立刻填上内容
@@ -2225,14 +2247,37 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 7 个按钮的动作。
+     * 快捷菜单按钮的动作。
      *
-     * 实现状态（v1.12 复核）：**7 项全部接真实行为**。
+     * 实现状态（v1.12 复核）：**7 项全部接真实行为**；v1.15 需求 4 起首位是「收藏」，共 8 项。
      * 曾经有 3 项只弹「将在 Mx 接入」的提示条（投屏 / 节目单 / 多线路 / 播放控制），
      * 现已分别由 v1.8 的 DLNA、v1.9 的线路选框与播放控制弹层、v1.12 的节目单列补齐。
      */
     private fun onQuickOpAction(action: QuickOpView.Action) {
         when (action) {
+            QuickOpView.Action.FAVORITE -> {
+                // v1.15 需求 4（用户）：「在详情菜单里的投屏按钮前面添加一个收藏功能，
+                // 默认是显示收藏，点一下就显示已收藏，再点一下有变成收藏」。
+                // 复用左侧菜单长按收藏那套（Prefs.toggleFavorite + 连线路快照），
+                // 只是入口换到快捷菜单，并**就地更新按钮文案**（不重开菜单）。
+                val ch = currentChannel
+                if (ch == null) {
+                    Snackbar.show("当前没有频道", this)
+                } else if (!Prefs.iptvChannelFavoriteEnable(this)) {
+                    Snackbar.show("收藏功能已在设置里关闭", this)
+                } else {
+                    val added = Prefs.toggleFavorite(this, ch)
+                    // added = 切换**后**的状态（true = 已收藏），按钮文案直接跟上
+                    quickOp.setFavoriteState(added)
+                    UiLog.i("界面", "快捷菜单收藏：${ch.name} → ${if (added) "已收藏" else "已取消收藏"}")
+                    Snackbar.show(if (added) "已收藏：${ch.name}" else "已取消收藏：${ch.name}", this)
+                    // 「我的收藏」面板若在屏，同步刷新（收藏名单变了）
+                    if (::navColumn.isInitialized && navEntries.getOrNull(navIdx)?.label == NAV_FAVORITE) {
+                        renderFavoritesPanel()
+                    }
+                }
+            }
+
             QuickOpView.Action.DLNA -> {
                 // 问题 6：真正接通 DLNA 投屏（此前只弹一句「将在 M11 接入」）
                 showDlnaCast()
@@ -2353,22 +2398,17 @@ class MainActivity : AppCompatActivity() {
             // M9：设置页（13 分类，左 216dp + 右内容）
             settings = SettingsView(this).apply {
                 onClose = { close() }
-                // 问题 7：「自定义直播源」点了没反应 —— 原来只调 hidePanel()/showPanel()，
-                // 而设置页是 MATCH_PARENT 且加在面板**之后**（盖在上面），所以看起来毫无变化。
-                // 现在：先关设置页，再展开三段式面板并落到「换源」，最后把焦点送进订阅列表。
-                onCustomSource = {
-                    close()
-                    if (panel.visibility != View.VISIBLE) showPanel()
-                    navIdx = 0
-                    if (navEntries.isNotEmpty()) {
-                        navColumn.select(0)
-                        onNavSelected(0)
-                    }
-                    handler.postDelayed({
-                        navColumn.getChildAt(0)?.requestFocus()
-                        FocusEngine.focusFirstIn(channelColumn)
-                    }, 80L)
-                }
+                // v1.15 需求 2（用户）：「在总设置菜单里的直播源-自定义直播源，点开不要调到
+                // 左侧菜单那了，在总设置菜单页的自定义直播源选项点开加个管理现有直播源的弹窗，
+                // 包含添加和删除的选项，点添加的话调用可以隔空传的那个窗口出来」。
+                //
+                // 原行为是关掉设置页 + 展开左侧面板跳到「换源」（问题 7 的修法）。
+                // 现在改成**在设置页之上叠一个管理弹窗**（见 [showSourceManage]）：
+                //   · 列表 = 现有订阅源（当前使用的那个标「使用中」）
+                //   · 确认键 = 切换到该源
+                //   · 「添加」= 调用带扫码的 addSourceDialog()
+                //   · 删除键 / 长按 = 删除（保底源除外，见 SourceManageView）
+                onCustomSource = { showSourceManage() }
                 // 问题 6：真正可用的分组管理（原来只弹一句 Snackbar）
                 onGroupManage = { showGroupManage(counterpart = false) }
                 onGroupManageAll = { showGroupManage(counterpart = true) }
@@ -2392,7 +2432,8 @@ class MainActivity : AppCompatActivity() {
             root.addView(settings, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-            // M7：常驻节目进度（开关 UI_SHOW_EPG_PROGRAMME_PERMANENT_PROGRESS，默认关）
+            // 常驻节目进度（v1.15 需求 3：原设置开关已删除，改为"有当前节目即显示"，
+            // 见 refreshEpgProgress / EpgProgressView 类注释）
             epgProgress = EpgProgressView(this)
           root.addView(epgProgress, FrameLayout.LayoutParams(
               ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -2439,7 +2480,10 @@ class MainActivity : AppCompatActivity() {
           // M6：中栏 = RecyclerView。
           channelColumn = ChannelColumnView(this).apply {
               channelRowHeight = s(62f)
-              logoSize = s(46f)
+              // v1.15 需求 6（用户）：台标放大 40%。46dp → 64dp（行高 62dp 不变，
+              // 64dp 的台标在 62dp 行里仍放得下：ChannelCardView 的 logo 有 2dp 内边距，
+              // 且 ImageView 是 FIT_CENTER，超了会自动缩小而不是裁切）。
+              logoSize = s(64f)
               onChannelClick = { ch, i -> selectChannel(ch, i, fromPanel = true) }
               // 问题 2：焦点移动**只预览**，不切台；按确认键（onChannelClick）才跳转
               onChannelFocus = { ch, i -> onChannelPreview(ch, i) }
@@ -2685,7 +2729,9 @@ class MainActivity : AppCompatActivity() {
         row.addView(mid, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { marginStart = s(6f); marginEnd = s(10f) })
-        row.addView(topLogo, LinearLayout.LayoutParams(s(64f), s(36f)))
+        // v1.15 需求 6（用户）：台标放大 40%。64×36 → 90×50（仍按 16:9 缩放，
+        // 取整后 90/50 = 1.8 ≈ 16:8.9，肉眼无变形；FIT_CENTER 会再兜一层）。
+        row.addView(topLogo, LinearLayout.LayoutParams(s(90f), s(50f)))
         topRight = row
         return row
     }
@@ -3006,14 +3052,12 @@ class MainActivity : AppCompatActivity() {
                     // M7：源就位后才拉节目单（要用频道名做过滤）
                     fetchEpg()
 
-                    // v1.14 需求 1：加载成功 → 提示窗消失，改由右下角信息框显示当前节目详情。
-                    // 底栏原本只在"面板在屏 / 有状态消息"时显示，刚加载完两者都不成立，
-                    // 所以用 bottomHoldUntil 主动把它撑出来一段（用户要求"换底部详细信息的框弹出"）。
+                    // v1.15 需求 7：加载成功后**不再**把右下角信息框撑出来 ——
+                    // 它与左下角带台标的临时信息框内容重复，用户要求"只显示左底部带 logo 的那个"。
+                    // 右下角信息框的显隐交回 refreshBottomVisibility() 的既有规则
+                    //（面板在屏 / 有状态消息），左下角 tempInfoBar 由换台链路自己弹 1.5 秒。
                     bottomStatusSticky = false
                     bottomStatusUntil = 0L
-                    bottomHoldUntil = SystemClock.uptimeMillis() + SOURCE_READY_INFO_MS
-                    handler.removeCallbacks(bottomHoldExpire)
-                    handler.postDelayed(bottomHoldExpire, SOURCE_READY_INFO_MS + 80L)
                     if (switching) {
                         UiLog.i("界面", "已切换：$label（共 ${groupList.flatChannels().size} 个频道）")
                     }
@@ -3388,6 +3432,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun switchSource(src: IptvSource) {
+        // v1.15 需求 5（用户）：「点按一下就是切换对应的源」。
+        // 点的就是当前正在用的源时**什么都不做** —— 否则每次点自己都会白屏重载一次，
+        // 用户体感是"点了没反应/又闪一下"。
+        if (src.url == Prefs.currentSourceUrl(this)) {
+            showBottomStatus("正在使用：${src.name}")
+            return
+        }
         // v1.14 需求 1：记下切换**之前**的源 —— 新源加载失败时要回退到它继续正常播放
         // （用户原话：「退回到原来的直播订阅链接正常播放那个订阅链接的内容」）。
         val previous = Prefs.currentSourceUrl(this)
@@ -3401,10 +3452,113 @@ class MainActivity : AppCompatActivity() {
         loadSource(src.url, src.name, fallbackUrl = previous)
     }
 
+    /**
+     * v1.15 需求 5：面板在屏时**短按确认键**。
+     *
+     * 接管原因见 `keysPanelExpanded` 里那段注释（View 会在按住 64ms 后就先点一次，
+     * 与长按语义打架）。这里自己分发到焦点项，等价于原来的行为：
+     * 频道行 → 换台、节目单项 → 播放、分组栏 → 切分组、订阅源行 → 切源。
+     */
+    private fun onPanelSelect() {
+        currentFocus?.performClick()
+    }
+
+    /**
+     * v1.15 需求 5：面板在屏时**长按 OK 键**（`keysPanelExpanded.onLongSelect`）。
+     *
+     * 分流规则：
+     *   · 中栏是「换源」列表且在某个源行上 → 删除确认（保底源不弹框，见 [handleSourceRowLongPressFromFocus]）
+     *   · 其余情况 → 手动 `performLongClick()` 把长按交给焦点项自己
+     *     （频道卡片长按 = 收藏 等）。为什么不依赖系统：见 `keysPanelExpanded` 里那段注释 ——
+     *     View 对确认键的长按**不会**走 `OnLongClickListener`。
+     */
+    private fun onPanelLongSelect() {
+        if (handleSourceRowLongPressFromFocus()) return
+        val f = currentFocus ?: return
+        if (!f.performLongClick()) {
+            UiLog.i("界面", "面板内长按确认键：焦点项没有长按语义（${f.javaClass.simpleName}）")
+        }
+    }
+
+    /**
+     * 用**焦点位置**判断长按的是不是「换源」列表里的订阅源行。
+     *
+     * 与坐标版 [handleSourceRowLongPress] 的区别：这条路是遥控器进来的，没有触点坐标，
+     * 只能看焦点落哪一行。两条路最终都汇到 [confirmRemoveSource]，语义一致。
+     *
+     * @return true = 已消费（不弹快捷菜单、也不再往下传）
+     */
+    private fun handleSourceRowLongPressFromFocus(): Boolean {
+        if (!::channelColumn.isInitialized) return false
+        val entry = navEntries.getOrNull(navIdx) ?: return false
+        if (entry.label != NAV_SWITCH_SOURCE) return false
+        val f = currentFocus ?: return false
+        // 焦点可能在左栏（分组栏）或中栏；不在中栏的列表行上时 -1
+        val idx = channelColumn.getChildAdapterPosition(f)
+        if (idx < 0) return false
+        val sources = Prefs.sources(this)
+        val src = sources.getOrNull(idx) ?: return false   // 末尾「＋ 添加直播源」行 → 不处理
+        if (idx == 0) {
+            UiLog.i("界面", "长按保底源（${src.name}）：不弹删除框")
+            return true
+        }
+        UiLog.i("界面", "长按确认键（OK）订阅源：${src.name} → 删除确认框")
+        confirmRemoveSource(src)
+        return true
+    }
+
+    /**
+     * v1.15 需求 5（用户）：「如果是长按ok键**或是触碰长按**对应订阅源的位置，
+     * 跳出一个是否确认删除对应订阅源的弹窗…保底自建源这个除外」。
+     *
+     * 两条路径各有各的坑：
+     *  · **遥控器长按 OK**：走 [onPanelLongSelect]（Keys 层绑定后手动分发），本函数不参与。
+     *  · **触屏长按**：`dispatchTouchEvent` 是"先喂手势检测、再派发进 View 树"，
+     *    长按一律先到 [gestureDetector] 的 `onLongPress`，行的 long click **永远收不到**。
+     *    所以只能由这里按**坐标**反查是哪一行（v1.10 处理"点遮罩关闭抽屉"时踩过同一机制）。
+     *
+     * @return true = 已消费，不再弹快捷功能菜单
+     */
+    private fun handleSourceRowLongPress(x: Float, y: Float): Boolean {
+        if (!::panel.isInitialized || panel.visibility != View.VISIBLE) return false
+        if (!::channelColumn.isInitialized) return false
+        // 只在「换源」这一项的中栏上生效（分组栏/收藏/应用列表不参与）
+        val entry = navEntries.getOrNull(navIdx) ?: return false
+        if (entry.label != NAV_SWITCH_SOURCE) return false
+        val row = channelColumn.findChildViewUnder(x, y) ?: return false
+        val idx = channelColumn.getChildAdapterPosition(row)
+        // 行的下标与 Prefs.sources() 一一对应；末尾的「＋ 添加直播源」越界 → 不处理
+        val sources = Prefs.sources(this)
+        val src = sources.getOrNull(idx) ?: return false
+        if (idx == 0) {
+            // 保底源（默认自建源）：长按不弹框，但要**吃掉事件**，
+            // 否则会冒泡出去把快捷功能菜单唤出来（实测过）
+            UiLog.i("界面", "长按保底源（${src.name}）：不弹删除框")
+            return true
+        }
+        UiLog.i("界面", "触屏长按订阅源：${src.name} → 删除确认框")
+        confirmRemoveSource(src)
+        return true
+    }
+
+    /**
+     * 删除直播源前的确认框（v1.15 需求 5）。
+     *
+     * 用户原话：「跳出一个是否确认删除对应订阅源的弹窗选项，可以选择保留或是删除」。
+     * 判据「这风格没统一」：原来是 AlertDialog（系统浅色 Material），已改为自绘应用风格对话框。
+     * 保底源（列表第一项，默认「自建源」）不会走到这里 —— 它在 [SourcePanelView.rows] 里
+     * 就没有注册长按（用户要求"这个长按就不用弹窗了"）。
+     */
     private fun confirmRemoveSource(src: IptvSource) {
-        // 判据「这风格没统一」：原来是 AlertDialog（系统浅色 Material），已改为自绘应用风格对话框。
+        if (src.url == Prefs.currentSourceUrl(this)) {
+            // 正在使用的源删掉会直接没内容播，先给一句明确反馈而不是弹确认框
+            showBottomStatus("正在使用的订阅源不能删除，请先切换到别的源")
+            return
+        }
         val built = AppDialog.buildConfirm(
-            this, "删除直播源", "${src.name}\n${src.url}", okLabel = "删除",
+            this, "删除直播源", "${src.name}\n${src.url}\n\n选择「保留」则不做任何改动。",
+            okLabel = "删除",
+            focusOnCancel = true,          // v1.15：危险动作默认停在「保留/取消」
             onCancel = { closeAppDialog() },
             onOk = {
                 Prefs.removeSource(this, src.url)
@@ -3444,10 +3598,23 @@ class MainActivity : AppCompatActivity() {
             }
         }
         view.onDelete = { src ->
-            Prefs.setEpgSourceList(this, custom.filterNot { it.url == src.url })
-            UiLog.i("节目单", "删除自定义节目单：${src.name}")
-            closeEpgSourceManage()
-            showEpgSourceManage()   // 重开以刷新列表
+            // v1.15 需求 2：删除前弹确认框（与「管理直播源」弹窗一致，避免误触）
+            val built = AppDialog.buildConfirm(
+                this,
+                title = "删除自定义节目单",
+                message = "确定删除「${src.name}」吗？\n${src.url}\n删除后需要重新添加才能恢复。",
+                okLabel = "删除",
+                focusOnCancel = true,      // v1.15：危险动作默认停在「取消」
+                onCancel = { closeAppDialog() },
+                onOk = {
+                    closeAppDialog()
+                    Prefs.setEpgSourceList(this, custom.filterNot { it.url == src.url })
+                    UiLog.i("节目单", "删除自定义节目单：${src.name}")
+                    closeEpgSourceManage()
+                    showEpgSourceManage()   // 重开以刷新列表
+                },
+            )
+            showAppDialog(built)
         }
         view.onAdd = {
             val built = AppDialog.buildInput(
@@ -3506,6 +3673,93 @@ class MainActivity : AppCompatActivity() {
         // 那正是设置页左栏的第一项「关于」，于是**设置页会从「节目单」跳回「关于」**，
         // 用户看到的像是"点了之后什么都没发生、还退到别的分类去了"。
         // 现在把焦点还回设置页刚才那一行，让切换结果原地可见。
+        if (::settings.isInitialized && settings.isOpen) {
+            handler.postDelayed({ runCatching { settings.restoreContentFocus() } }, 60L)
+        }
+    }
+
+    // ============ v1.15 需求 2：设置页「管理现有直播源」弹窗 ============
+
+    /** 当前打开的直播源管理弹窗（非 null 时返回键只关它）。 */
+    private var sourceManageView: SourceManageView? = null
+
+    /**
+     * 打开「管理直播源」弹窗（v1.15 需求 2）。
+     *
+     * 从设置页「直播源 → 自定义直播源」进入，**不跳左侧菜单**。
+     * 三层行为：
+     *   · 点按某行        → 切换到该订阅源（复用 [switchSource] 的失败回退逻辑）
+     *   · 长按 / 删除键   → 先弹确认框，选「删除」才真删（保底源无此入口）
+     *   · 「+ 添加」行    → 打开带扫码隔空填写的添加对话框（[addSourceDialog]）
+     */
+    private fun showSourceManage() {
+        closeSourceManage()
+        // 与分组管理等抽屉一致：先记住设置页焦点，关掉后搬回去
+        if (::settings.isInitialized && settings.isOpen) settings.rememberFocus()
+        val view = SourceManageView(this)
+        sourceManageView = view
+        view.onClose = { closeSourceManage() }
+        view.onSelect = { src ->
+            if (src.url != Prefs.currentSourceUrl(this)) {
+                closeSourceManage()
+                switchSource(src)
+            }
+        }
+        view.onDelete = { src -> confirmDeleteSource(src) }
+        view.onAdd = {
+            // 保留弹窗：添加成功后由 Prefs 变更驱动重绘（关掉对话框即可看到新源）
+            addSourceDialog()
+        }
+        view.show {
+            val current = Prefs.currentSourceUrl(this)
+            val list = Prefs.sources(this)
+            list.mapIndexed { i, src ->
+                SourceManageView.Row(
+                    source = src,
+                    isCurrent = src.url == current,
+                    // 第一个 = 保底源（默认自建源），永远不删
+                    removable = i != 0,
+                )
+            }
+        }
+        rootView.addView(view, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        view.bringToFront()
+        view.post { view.requestFocus() }
+        UiLog.i("设置", "直播源管理弹窗已打开（共 ${Prefs.sources(this).size} 个源）")
+    }
+
+    /** 删除订阅源前的确认框（v1.15 需求 2：可以选择保留或是删除）。 */
+    private fun confirmDeleteSource(src: IptvSource) {
+        if (src.url == Prefs.currentSourceUrl(this)) {
+            // 当前正在用的源删掉会直接没内容播，先给一句明确反馈
+            showBottomStatus("正在使用的订阅源不能删除，请先切换到别的源")
+            return
+        }
+        val built = AppDialog.buildConfirm(
+            this,
+            title = "删除订阅源",
+            message = "确定删除「${src.name}」吗？\n${src.url}\n删除后需要重新添加才能恢复。",
+            okLabel = "删除",
+            focusOnCancel = true,          // v1.15：危险动作默认停在「取消」
+            onCancel = { closeAppDialog() },
+            onOk = {
+                closeAppDialog()
+                Prefs.removeSource(this, src.url)
+                UiLog.i("设置", "删除订阅源：${src.name}")
+                // 弹窗还在就地重绘；顺便让左侧换源列表也跟着更新
+                sourceManageView?.render()
+                runCatching { renderSourcePanel() }
+                showBottomStatus("已删除：${src.name}")
+            },
+        )
+        showAppDialog(built)
+    }
+
+    private fun closeSourceManage() {
+        val v = sourceManageView ?: return
+        (v.parent as? ViewGroup)?.removeView(v)
+        sourceManageView = null
         if (::settings.isInitialized && settings.isOpen) {
             handler.postDelayed({ runCatching { settings.restoreContentFocus() } }, 60L)
         }

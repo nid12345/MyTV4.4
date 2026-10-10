@@ -19,9 +19,12 @@ import top.yogiczy.mytv.legacy.data.EpgProgramme.Companion.remainingMinutes
 /**
  * 常驻节目进度条。
  *
- * 对应原版 `EpgProgrammeProgressScreen`：
- * 开关 `UI_SHOW_EPG_PROGRAMME_PERMANENT_PROGRESS`，**默认关**。
- * 打开后常驻显示「当前节目 + 进度 + 剩余分钟」。
+ * 对应原版 `EpgProgrammeProgressScreen`。
+ *
+ * ⚠️ v1.15 需求 3（用户）：「常驻底部节目进度」**设置项已删除**。原来它由
+ * `UI_SHOW_EPG_PROGRAMME_PERMANENT_PROGRESS`（默认关）控制，现在改成
+ * **有当前节目就显示、没有就自动收起**（`setEnabledByPref(now != null)`）——
+ * 与「频道项底部进度条」那个开关各管一处，不再需要手动开关。
  */
 class EpgProgressView(context: Context) : LinearLayout(context) {
 

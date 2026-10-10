@@ -50,14 +50,21 @@ import top.yogiczy.mytv.legacy.ui.system.ScreenAutoClose
  */
 class QuickOpView(context: Context) : FrameLayout(context) {
 
-    /** 7 项动作。顺序即 [ENTRIES] 的顺序。 */
-    enum class Action { DLNA, EPG, CHANNEL_URL, CONTROLLER, DISPLAY_MODE, CLEAR_CACHE, MORE_SETTINGS }
+    /**
+     * 动作项。顺序即 [ENTRIES] 的顺序。
+     *
+     * v1.15 需求 4（用户）：「在详情菜单里的投屏按钮前面添加一个收藏功能」——
+     * 所以 [FAVORITE] 必须排在 [DLNA] 前面（[ENTRIES] 的第一项）。
+     */
+    enum class Action { FAVORITE, DLNA, EPG, CHANNEL_URL, CONTROLLER, DISPLAY_MODE, CLEAR_CACHE, MORE_SETTINGS }
 
     companion object {
         /**
-         * 与原版 `QuickOpBtnList.kt` 的 7 个 `item {}` 逐条对应（含顺序）。
+         * 与原版 `QuickOpBtnList.kt` 的 7 个 `item {}` 逐条对应（含顺序），
+         * 另在首位插入 v1.15 需求 4 的「收藏」。
          */
         val ENTRIES: List<Pair<String, Action>> = listOf(
+            "收藏" to Action.FAVORITE,
             "投屏" to Action.DLNA,
             "节目单" to Action.EPG,
             "多线路" to Action.CHANNEL_URL,
@@ -282,13 +289,38 @@ class QuickOpView(context: Context) : FrameLayout(context) {
                 true
             } else false
         }
+        if (action == Action.FAVORITE) favoriteBtn = this
     }
 
-    /** 打开：清空各按钮焦点并**把焦点放到第一项「投屏」**（原版 focusOnLaunched）。 */
-    fun open(channelNumber: String = "", sourceName: String = "") {
+    /**
+     * 「收藏」按钮（v1.15 需求 4）。建按钮时登记，[setFavoriteState] 用来改文案。
+     * 默认 null —— 万一 ENTRIES 里没这一项也不会 NPE。
+     */
+    private var favoriteBtn: TextView? = null
+
+    /**
+     * 刷新「收藏」按钮的文案。
+     *
+     * v1.15 需求 4（用户原话）：「默认是显示收藏，点一下就显示已收藏，再点一下有变成收藏」
+     * —— 所以这是个**状态可反的按钮**，文案必须跟着当前频道的收藏状态走；
+     * 换台后要重新调一次，否则会停在上一台的「已收藏」上。
+     *
+     * 文案用纯「收藏 / 已收藏」（不带频道名）：按钮就那么宽，带上频道名会被截断，
+     * 而且 Snackbar 已经给了「已收藏：XXX」的完整反馈。
+     */
+    fun setFavoriteState(favorited: Boolean) {
+        favoriteBtn?.text = if (favorited) "已收藏" else "收藏"
+    }
+    /**
+     * 打开：清空各按钮焦点并把焦点放到第一项（原版 focusOnLaunched）。
+     *
+     * v1.15 需求 4 起第一项是「收藏」，不再是「投屏」。
+     */
+    fun open(channelNumber: String = "", sourceName: String = "", favorited: Boolean = false) {
         iptvSourceName = sourceName
         sourceLabel.text = sourceName
         numberView.text = channelNumber.padStart(2, '0')
+        setFavoriteState(favorited)
         visibility = VISIBLE
         bringToFront()
         autoClose.cancel()

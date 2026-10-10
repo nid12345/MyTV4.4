@@ -299,6 +299,15 @@ object Prefs {
     fun favorites(ctx: Context): List<String> =
         iptvChannelFavoriteItems(ctx).map { it.name }
 
+    /**
+     * 该频道当前是否已被收藏。
+     *
+     * v1.15 需求 4：快捷菜单的「收藏 / 已收藏」按钮要用它决定初始文案
+     * （[toggleFavorite] 是"切换"，拿不到当前状态）。
+     */
+    fun isFavorite(ctx: Context, channelName: String): Boolean =
+        iptvChannelFavoriteItems(ctx).any { it.name == channelName }
+
     /** 返回切换后的状态：true = 已收藏。 */
     fun toggleFavorite(ctx: Context, channelName: String): Boolean {
         val items = iptvChannelFavoriteItems(ctx).toMutableList()
@@ -729,13 +738,9 @@ object Prefs {
         sp(ctx).edit().putBoolean("IPTV_CHANNEL_AUTO_PLAY_NEXT", value).commit()
     }
 
-    /** 常驻底部节目进度（`UI_SHOW_EPG_PROGRAMME_PERMANENT_PROGRESS`，默认 false）。 */
-    fun uiShowEpgProgrammePermanentProgress(ctx: Context): Boolean =
-        sp(ctx).getBoolean("UI_SHOW_EPG_PROGRAMME_PERMANENT_PROGRESS", false)
-
-    fun setUiShowEpgProgrammePermanentProgress(ctx: Context, value: Boolean) {
-        sp(ctx).edit().putBoolean("UI_SHOW_EPG_PROGRAMME_PERMANENT_PROGRESS", value).commit()
-    }
+    // v1.15 需求 3：「常驻底部节目进度」（UI_SHOW_EPG_PROGRAMME_PERMANENT_PROGRESS）
+    // 整项删除 —— 读取函数与 setter 一并移除，设置页也不再出现该行。
+    // EpgProgressView 仍按「有当前节目」自动显隐，见 MainActivity.refreshEpgProgress。
 
     /** 更新强提醒（`UPDATE_FORCE_REMIND_ENABLE`，默认 false）。 */
     fun updateForceRemindEnable(ctx: Context): Boolean =

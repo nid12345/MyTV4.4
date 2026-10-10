@@ -81,7 +81,7 @@ class App : MultiDexApplication() {
  *    （M0 之前它就停在 "0.3.1-legacy"，比实际版本落后三个版本）。
  */
 object BuildConfigCompat {
-    const val VERSION_NAME = "1.14-legacy.19"
+    const val VERSION_NAME = "1.15-legacy.20"
 
     /**
      * 版本序号（单调递增）。
@@ -97,6 +97,7 @@ object BuildConfigCompat {
      * ⚠️ v1.12：17。
      * ⚠️ v1.13：18。
      * ⚠️ v1.14：19。
+     * ⚠️ v1.15：20。
      */
-    const val VERSION_CODE = 19
+    const val VERSION_CODE = 20
 }

@@ -80,7 +80,11 @@ class ChannelInfoView(
         orientation = HORIZONTAL
         gravity = Gravity.BOTTOM
         if (showLogo) {
-            addView(logo, LayoutParams(dp(100f), dp(56f)).apply { marginEnd = dp(16f) })
+            // v1.15 需求 6（用户）：「台标logo可以再大40%」。
+            // 100×56 → 140×78（= 100×1.4 / 56×1.4，保持 16:9 不变形）。
+            // ⚠️ 与左侧菜单频道行的台标（46→64dp，见 MainActivity.buildPanel 的 logoSize）
+            //    和右上角大台标（64×36 → 90×50）配套放大，三处一起改才不显乱。
+            addView(logo, LayoutParams(dp(140f), dp(78f)).apply { marginEnd = dp(16f) })
         } else {
             logo.visibility = View.GONE
         }

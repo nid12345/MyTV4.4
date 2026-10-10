@@ -176,10 +176,10 @@ object SettingsCats {
         prog.setSwitch(Prefs.uiShowEpgProgrammeProgress(ctx)) {
             Prefs.setUiShowEpgProgrammeProgress(ctx, it)
         }
-        val perm = row(ctx, "常驻底部节目进度", "在播放器底部显示当前节目进度条")
-        perm.setSwitch(Prefs.uiShowEpgProgrammePermanentProgress(ctx)) {
-            Prefs.setUiShowEpgProgrammePermanentProgress(ctx, it)
-        }
+        // v1.15 需求 3（用户）：删除「常驻底部节目进度」整项。
+        // 原由 Prefs.UI_SHOW_EPG_PROGRAMME_PERMANENT_PROGRESS 控制；该项与左下角带台标的
+        // 临时信息框、右下角信息框内容重复（v1.15 需求 7 已按同一思路去掉右下角框），
+        // 用户要求"这个选项删除掉"。键与读取函数一并移除。
         // v1.8：「台标显示」已**接通**（见 ChannelLogoStore.bitmapFor：关闭时所有位置的
         // 台标都不再加载 —— 频道列表、右上台标、换台信息块统一生效）。
         val logo = row(ctx, "台标显示", "频道列表 / 右上台标 / 换台信息块")
@@ -230,7 +230,8 @@ object SettingsCats {
             font.setValue(String.format("%.1f", next))
         }
         // v1.8 删除「焦点优化」：本工程没有原版那套 Compose focusProperties 机制，无对应实现。
-        l += listOf(prog, perm, logo, time, close, density, font)
+        // v1.15 需求 3：perm（常驻底部节目进度）已从列表移除。
+        l += listOf(prog, logo, time, close, density, font)
         return l
     }
 

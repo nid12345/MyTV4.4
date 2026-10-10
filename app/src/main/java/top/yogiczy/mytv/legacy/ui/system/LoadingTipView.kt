@@ -54,9 +54,18 @@ class LoadingTipView(context: Context) : FrameLayout(context) {
     private val label = TextView(context)
     private val card = LinearLayout(context)
 
-    /** 屏高 20% 的底边留白 —— 「中间底下」。 */
+    /**
+     * 底边留白（px）—— v1.15 需求 1（用户）：
+     * 「正在加载直播源那个框框显示位置太高，显示在和左侧菜单的最低边同个高度位置就好」。
+     *
+     * 左侧三段式面板的底边落在「屏高 − 24dp」（`MainActivity.panelMaxH = 屏高 − 2×24dp`
+     * + `topMargin = 24dp`，v1.13 需求 4 用它同时对齐右下角信息框底边）。
+     * 所以这里取同一个 24dp 网格值，提示窗底边就与面板底边齐平。
+     *
+     * 历史：v1.14 时是「屏高 × 20%」，用户反馈偏高 → 改成 24dp。
+     */
     private val bottomGap: Int
-        get() = (resources.displayMetrics.heightPixels * 0.20f).toInt()
+        get() = s(EDGE_DP)
 
     init {
         // 吃掉点击与按键：加载期间不应该能点穿到底下任何东西
@@ -198,5 +207,11 @@ class LoadingTipView(context: Context) : FrameLayout(context) {
 
         /** 失败卡片的文字色（配 `Palette.error` 的浅红底）。 */
         const val COLOR_ERROR_TEXT = 0xFF410002.toInt()
+
+        /**
+         * 底边留白（dp）—— 与三段式面板 / 右下角信息框共用同一条 24dp 网格，
+         * 见 [bottomGap] 的说明。改这里必须同时核对 `MainActivity.panelEdgeDp`。
+         */
+        const val EDGE_DP = 24f
     }
 }

@@ -25,13 +25,13 @@
 ## 当前进度
 
 - 已完成：**M0 / M1 / M2 / M3（含三项补测） / M4 / M5 / M6 / M7 / M8 / M9 / M10 / M13 / M14**
-- 已交付版本：**v1.0 → v1.14**（`versionCode 6 → 19`），全部已发 GitHub Release（tag `v1.8` / `v1.10`～`v1.14`）
+- 已交付版本：**v1.0 → v1.15**（`versionCode 6 → 20`），全部已发 GitHub Release（tag `v1.8` / `v1.10`～`v1.15`）
 - 进行中：**无**
-- **最新产物**：`dist/MyTV4.4-v1.14-legacy19.apk`（release）/ `dist/MyTV4.4-v1.14-legacy19-debug.apk`
+- **最新产物**：`dist/MyTV4.4-v1.15-legacy20.apk`（release）/ `dist/MyTV4.4-v1.15-legacy20-debug.apk`
 - **签名**：`keystore/mytv-release.jks`（alias=mytv，需备份）；
   SHA-256 `02e143e8102283c2a3d26c505ea5fa44962ff84115eb598cbed467c97236f7c2`（v1.7 起未换钥）
 - **阻塞**：无
-- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.14 = `versionCode 19`）
+- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.15 = `versionCode 20`）
 - 下一个强制汇报检查点：**下一轮用户需求到来时**
 
 ## 📌 已知偏差（记入不追究）
@@ -2179,3 +2179,60 @@ v1.13 的"所有"字面上包含面板 → **回问后用户裁决：包含面�
   （两个 APK 均 `uploaded`）；源码 commit **`db2d13c`**（5 新增 + 10 修改）；
   线上回验：清单 versionCode 19 / size 10365796… 与本地产物一致，从 Release 下载的 APK
   `cmp` 逐字节相同、badging 与证书 `02e143e8…` 一致
+---
+
+# v1.15（versionCode 20 / `1.15-legacy.20`，2026-10-15）
+
+用户一次提 7 条体验需求，全部实现并在 API 19 模拟器实测通过；另修掉 1 个**误删风险**
+（删除确认框默认焦点在危险按钮上）与 1 个**长期失效的交互**（按键长按从不生效）。
+
+## 实现要点（签名级）
+
+| 需求 | 入口 |
+|---|---|
+| 1 加载提示窗位置 | `LoadingTipView.bottomGap` 由「屏高 20%」改为 **24dp**，与面板底边同一条网格（实测底边距屏底 31 物理 px ≈ 23dp，面板为 24dp） |
+| 2 设置页自定义直播源改弹窗 | 新增 `ui/settings/SourceManageView.kt`（点按切换 / 长按删除 / 末尾「＋ 添加直播源（支持手机扫码填写）」）；`onCustomSource` 不再跳左侧面板；`EpgSourceView` 每行加**显式「删除」按钮** + 确认框 |
+| 3 删「常驻底部节目进度」 | 设置项 / `Prefs.uiShowEpgProgrammePermanentProgress` / `SettingsView` 状态串全删；`epgProgress.setEnabledByPref(now != null)` |
+| 4 详情菜单加收藏 | `QuickOpView.Action.FAVORITE` 置 `ENTRIES` 首位；`setFavoriteState()`；`Prefs.isFavorite()` 新增；`quickOp.open(favorited=…)` |
+| 5 换源列表长按删除 | `SourcePanelView.rows` 保底源（下标 0）长按给**空 lambda**（消费事件但不做事）；`switchSource` 点当前源不再重载；新增 `onPanelSelect()` / `onPanelLongSelect()` / `handleSourceRowLongPressFromFocus()` / `handleSourceRowLongPress(x,y)` |
+| 6 台标放大 40% | 频道行 46→64dp、右上 64×36→90×50dp、`ChannelInfoView` 100×56→140×78dp；`ChannelCardView` 的 logo 内边距 2dp→0 |
+| 7 去掉右下角信息框 | 作废 v1.14 的 `bottomHoldUntil` / `SOURCE_READY_INFO_MS` / `holdAlive`；`refreshBottomVisibility` 回到「面板在屏 ∨ 有状态消息」 |
+
+## 本轮撞出来的三个真问题（都改了）
+
+1. **删除确认框默认焦点在「删除」上 → 有误删风险**。
+   新增 `AppDialog.buildConfirm(focusOnCancel = true)`，三处删除确认框一律默认停在「取消」。
+   （验证过程中我自己就误删了一个内置源，靠夹具 `reset` 恢复。）
+2. **按键长按从来就没生效过**。`View.onKeyDown` 对 `DPAD_CENTER/ENTER` 只做
+   「DOWN 时 `post(mPerformClick)`，约 64ms 后 performClick()，UP 时 removeCallbacks」——
+   按住不放时那 64ms 早就过了，于是**长按还没触发，行先被点了一次**
+   （换源列表里表现为"长按想删源，结果先切了源"）。
+   现在 `keysPanelExpanded` 把 `onSelect` 与 `onLongSelect` **一起接管**，短按在 UP 触发、
+   长按在 `repeatCount==1` 触发，互不干扰；长按若非删除语义则 `performLongClick()` 转交焦点项。
+3. **触屏长按收不到**。`dispatchTouchEvent` 先喂手势检测再派发进 View 树，行长按永远收不到 →
+   由宿主 `onLongPress` 按**坐标**反查行（`findChildViewUnder` + `getChildAdapterPosition`）。
+
+## 验证（API 19 模拟器，logcat 标记驱动截图）
+
+- 需求 1：像素实测提示窗底边距屏底 31px ≈ 23dp（面板 24dp）—— 齐平。
+- 需求 2：设置页「自定义直播源」弹出「管理直播源」（**不跳左侧菜单**），保底源标「保底源（不可删除）」；
+  「＋ 添加直播源」调出带扫码的添加框，`adb forward` + curl 走完 GET/POST → 输入框原地回填 +
+  「已收到推送，核对后点『添加』」。
+- 需求 3：设置 → 界面 分类实测只剩「节目进度 / 台标显示 / 时间显示 / 超时自动关闭界面 /
+  界面整体缩放比例 / 界面字体缩放比例」，「常驻底部节目进度」已消失。
+- 需求 4：「收藏」在「投屏」前；点一下按钮变「已收藏」+ Snackbar「已收藏：CCTV-2 财经」，
+  再点变回「收藏」+「已取消收藏」。
+- 需求 5：长按保底源**完全无反应**（日志 `长按保底源（自建源）：不弹删除框`，面板也不被收起）；
+  长按其他源弹「删除直播源」确认框（默认焦点在「取消」）；点删除后该行消失、列表就地刷新；
+  点按切源正常；遥控器与触屏两条路径分别验证。
+- 需求 6：截图可见右上角与左下角台标明显变大。
+- 需求 7：首次进入与换源后右下角信息框**不出现**，只有左下角带台标的那个。
+
+## 产物（v1.15，versionCode 20）
+
+- `dist/MyTV4.4-v1.15-legacy20.apk`（release **10,373,110 B**，MD5 `f2623248e83c911749402aa406afba9f`，
+  证书 SHA-256 `02e143e8…` 与 v1.7 起一致）
+- `dist/MyTV4.4-v1.15-legacy20-debug.apk`（debug **12,951,011 B**，MD5 `3552e8883f714c6082fc95d0568a9727`）
+  —— 原始产物 17,217,053 B 有 4.3MB 对齐空洞，已按 v1.13 的老办法 `zipalign -p 4` + 重签消除
+- `update/version.json` → v1.15 清单
+- 交付报告：`dist/v1.15-报告.md`

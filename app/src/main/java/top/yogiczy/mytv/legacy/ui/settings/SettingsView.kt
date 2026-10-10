@@ -439,7 +439,7 @@ class SettingsView(context: Context) : LinearLayout(context) {
                 .append(Prefs.uiScreenAutoCloseDelay(ctx)).append(Prefs.uiDensityScaleRatio(ctx))
                 .append(Prefs.uiFontScaleRatio(ctx)).append(Prefs.uiFocusOptimize(ctx))
                 .append(Prefs.uiShowEpgProgrammeProgress(ctx))
-                .append(Prefs.uiShowEpgProgrammePermanentProgress(ctx))
+            // v1.15 需求 3：不再追加 uiShowEpgProgrammePermanentProgress（该项已删除）
             append(Prefs.iptvChannelFavoriteEnable(ctx)).append(Prefs.favorites(ctx).size)
             append(Prefs.httpRetryCount(ctx)).append(Prefs.httpRetryInterval(ctx))
             append(Prefs.debugShowFps(ctx)).append(Prefs.debugShowPlayerInfo(ctx))
