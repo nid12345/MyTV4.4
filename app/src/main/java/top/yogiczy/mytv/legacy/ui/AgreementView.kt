@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Color
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.ViewGroup
 import android.view.View
 import android.widget.LinearLayout
@@ -46,12 +47,23 @@ class AgreementView(
         "如您继续使用本软件即代表您已完全理解并同意上述内容。",
     )
 
+    /** 「已阅读并同意」按钮（默认焦点要落在它上面，见 [focusDefault]）。 */
+    private lateinit var agreeBtn: TextView
+
+    /** 「退出应用」按钮。 */
+    private lateinit var exitBtn: TextView
+
     init {
         orientation = VERTICAL
         gravity = Gravity.CENTER
         setBackgroundColor(Palette.background(context))   // 原版 customBackground：全屏不透明
         isClickable = true          // 挡住底下视图的点击
         isFocusable = true
+        // ⚠️ v1.8 关键修复：ViewGroup 默认是 `FOCUS_BEFORE_DESCENDANTS` —— 根节点自己也可聚焦时，
+        //    子按钮 `requestFocus()` 的结果会被根节点"截胡"，焦点停在根覆盖层上。
+        //    模拟器实测：dump 里 `focused` 是 `[0,0][1196,720]` 的根节点，确认键对着它毫无反应，
+        //    没有触屏的盒子会被永久卡在这一屏。改成「子视图优先」后 [focusDefault] 才真正生效。
+        descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
         // ⚠️ 不设 isFocusableInTouchMode：设了会让触屏第一次点只拿焦点不触发按钮 onClick
         //    （模拟器实测踩到：点「已阅读并同意」无反应）。
 
@@ -85,13 +97,46 @@ class AgreementView(
             onAgree()
         }
         val exitBtn = button("退出应用") { onDisagree() }
-        agreeBtn.requestFocus()          // 原版 focusOnLaunched：默认落在「已阅读并同意」
+        this.agreeBtn = agreeBtn
+        this.exitBtn = exitBtn
         row.addView(agreeBtn)
         row.addView(exitBtn, rowLayoutParams().apply { leftMargin = UiKit.dp(context, 12f) })
 
         addView(row, LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = UiKit.dp(context, 44f) })
+    }
+
+    /**
+     * v1.8 修复：「默认焦点落在【已阅读并同意】」这件事必须在**入树之后**做。
+     *
+     * 原来只有 `init` 里的 `requestFocus()` —— 那时视图还没附着到窗口，调用是无效的；
+     * 宿主 `addView` 之后又把焦点交给了**根覆盖层**（`gate.requestFocus()`），于是焦点停在
+     * 根节点上：**没有触屏的老盒子按遥控器确认键毫无反应，用户被卡在这一屏**
+     * （模拟器实测：dump 里 `focused` 在根覆盖层，KEYCODE_DPAD_CENTER 无任何效果）。
+     *
+     * 宿主改为 addView 后调用本方法（不要再 `gate.requestFocus()`）。
+     */
+    fun focusDefault() {
+        if (::agreeBtn.isInitialized) agreeBtn.requestFocus()
+    }
+
+    /**
+     * 键盘/遥控器兜底：若焦点还没落在任何一个按钮上（例如设备处于**触摸模式**时
+     * `requestFocus()` 会被系统拒绝 —— 非 `focusableInTouchMode` 的视图在触摸模式下不能获焦），
+     * 任意方向键/确认键到来时先把焦点补到「已阅读并同意」，避免"按了没反应"。
+     */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        val nav = keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
+            keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
+            keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER
+        if (nav && ::agreeBtn.isInitialized) {
+            val f = findFocus()
+            if (f !== agreeBtn && !(::exitBtn.isInitialized && f === exitBtn)) {
+                if (agreeBtn.requestFocus()) return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
     }
 
     /** 原版按钮容器色 `onSurface.copy(alpha = 0.1f)`，焦点态实底（与本工程 AppDialog 一致）。 */

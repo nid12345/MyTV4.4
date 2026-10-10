@@ -91,8 +91,11 @@ enum class VideoPlayerDisplayMode(val label: String, val value: Int) {
 /**
  * 时间显示模式。来源：原版 `Configs.UiTimeShowMode`，值一一对应。
  */
-enum class UiTimeShowMode(val value: Int) {
-    HIDDEN(0), ALWAYS(1), EVERY_HOUR(2), HALF_HOUR(3);
+enum class UiTimeShowMode(val value: Int, val label: String) {
+    HIDDEN(0, "隐藏"),
+    ALWAYS(1, "常显"),
+    EVERY_HOUR(2, "整点显隐"),
+    HALF_HOUR(3, "半点显隐");
 
     companion object {
         fun fromValue(value: Int): UiTimeShowMode = entries.firstOrNull { it.value == value } ?: ALWAYS

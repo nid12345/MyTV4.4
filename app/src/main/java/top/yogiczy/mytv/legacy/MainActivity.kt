@@ -59,6 +59,9 @@ import top.yogiczy.mytv.legacy.player.PlayerController
 import top.yogiczy.mytv.legacy.ui.ChannelCardView
 import top.yogiczy.mytv.legacy.ui.ChannelInfoView
 import top.yogiczy.mytv.legacy.ui.AgreementView
+import top.yogiczy.mytv.legacy.ui.DebugOverlayView
+import top.yogiczy.mytv.legacy.ui.UpdateProgressView
+import top.yogiczy.mytv.legacy.ui.epg.EpgSourceView
 import top.yogiczy.mytv.legacy.ui.ChannelLogoStore
 import top.yogiczy.mytv.legacy.ui.DatetimeView
 import top.yogiczy.mytv.legacy.ui.DlnaCastView
@@ -343,6 +346,10 @@ class MainActivity : AppCompatActivity() {
                 tagSpeed.text = "${player.speedKBps}KB/s"
                 updateBottomProgress()
             }
+            // v1.8：调试叠加层（三个开关都在「调试」分类里，关着时整层 GONE）
+            if (::debugOverlay.isInitialized && ::player.isInitialized) {
+                debugOverlay.applyPrefs(playerDebugText())
+            }
             handler.postDelayed(this, 1000L)
         }
     }
@@ -400,6 +407,15 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    /** v1.8：调试叠加层（FPS / 播放器信息 / 布局网格）。 */
+    private lateinit var debugOverlay: DebugOverlayView
+
+    /** v1.8：更新下载进度层（非 null 时按键与触摸都不穿透）。 */
+    private var updateProgress: UpdateProgressView? = null
+
+    /** v1.8：节目单管理抽屉。 */
+    private var epgSourceView: EpgSourceView? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enterFullscreen()
@@ -440,6 +456,8 @@ class MainActivity : AppCompatActivity() {
         if (!Prefs.appAgreementAgreed(this)) showAgreementGate()
         loadSource(Prefs.currentSourceUrl(this))
         refreshTopRight()
+        // v1.8 接通「升级提醒」：启动后自动静默检查一次更新（设置页里那一项原来只写 Prefs、无人读）。
+        if (Prefs.updateRemindEnable(this)) checkStartupUpdate()
     }
 
     override fun onDestroy() {
@@ -516,6 +534,20 @@ class MainActivity : AppCompatActivity() {
         if (dlnaView != null) {
             cancelExitConfirm()
             closeDlnaCast()
+            return
+        }
+        // v1.8：节目单管理抽屉（返回键关它，不要一路退到退出应用）
+        if (epgSourceView != null) {
+            cancelExitConfirm()
+            closeEpgSourceManage()
+            return
+        }
+        // v1.8：更新下载中，返回键 = 取消下载（与进度层上的「取消」同义），不退出应用
+        if (updateProgress != null) {
+            cancelExitConfirm()
+            cancelUpdateDownload = true
+            closeUpdateProgress()
+            showBottomStatus("已取消更新下载")
             return
         }
         when {
@@ -676,7 +708,12 @@ class MainActivity : AppCompatActivity() {
             val names = groupList.flatChannels().map { it.name }
             try {
                 val current = Prefs.epgSourceCurrent(this)
-                val fallbacks = Prefs.epgSourceList(this).filterNot { it.url == current.url }
+                // v1.8 修复：回退来源必须是「内置节目单 + 自定义节目单」（原来只取自定义，
+                // 于是当前用的是内置源、而它失效时**没有任何回退**，直接判"所有来源都不可用"）。
+                // 顺序：内置在前（与节目单管理列表同序），自定义在后；按 url 去重并排除当前源。
+                val fallbacks = (Prefs.EPG_SOURCE_LIST + Prefs.epgSourceList(this))
+                    .distinctBy { it.url }
+                    .filterNot { it.url == current.url }
                 val list = EpgRepository(cacheDir, current, fallbacks)
                     .getEpgList(names, Prefs.epgRefreshTimeThreshold(this))
                 epgList = list
@@ -861,15 +898,25 @@ class MainActivity : AppCompatActivity() {
         jumpToChannel(all[n])
     }
 
-    /** 切换线路（原版：只有多线路时才切，单线路左右键无动作）。 */
+    /**
+     * 切换线路（v1.8：改为**循环**）。
+     *
+     * 用户要求：向右滑 → 第 2 条 → 第 3 条 → …… → 最后一条后再右滑回到第 1 条；
+     * 向左滑完全相反。原来是 `coerceIn(0, last)`，到边界就停住（滑了没反应）。
+     *
+     * 遥控器左右键走的也是这个函数，所以两端行为一致。
+     */
     private fun changeLineBy(step: Int) {
         if (!::player.isInitialized) return
-        if (player.lineCount <= 1) return
-        val next = (player.currentLineIdx + step).coerceIn(0, player.lineCount - 1)
-        if (next == player.currentLineIdx) return
+        val count = player.lineCount
+        if (count <= 1) return
+        val cur = player.currentLineIdx
+        val next = ((cur + step) % count + count) % count   // 负数取模：保证左滑也能轮回
+        if (next == cur) return
         player.switchLine(next)
-        // 问题 3（用户）：左右切换同名源的线路时，同样弹 1.5 秒的频道信息块
+        // 问题 3（用户）：左右切换同名源的线路时，同样弹频道信息块
         showTempChannelInfo()
+        UiLog.i("界面", "切线路 → ${next + 1}/${count}（循环）")
     }
 
     /**
@@ -884,6 +931,12 @@ class MainActivity : AppCompatActivity() {
      * 是简化表述，实际窗口更宽，照原版实现即可通过。
      */
     private fun numberInput(no: Int) {
+        // v1.8：设置页「数字选台」在这里真实生效 —— 关掉后数字键不再选台
+        // （之前这个开关只写 Prefs、没有任何地方读，是摆设）。
+        if (!Prefs.iptvChannelNoSelectEnable(this)) {
+            UiLog.i("界面", "数字键忽略（数字选台已关闭）")
+            return
+        }
         numberBuffer += no.toString()
         Log.i(Keys.TAG, "数字选台输入=${numberBuffer}")
         topNumber.visibility = View.VISIBLE
@@ -939,6 +992,10 @@ class MainActivity : AppCompatActivity() {
             else if (groupManageView != null) keysNone
             // 问题 6：投屏抽屉开着时放行给控件（设备列表要能移动焦点 / 选中）
             else if (dlnaView != null) keysNone
+            // v1.8：节目单管理抽屉开着时放行给控件（列表项要能吃确认键 / 删除键）
+            else if (epgSourceView != null) keysNone
+            // v1.8：更新进度层（按钮要能吃确认键）
+            else if (updateProgress != null) keysNone
             // ⚠️ 设置页打开时必须放行给焦点系统：否则方向键会被解释成"换台"，
             // 左栏焦点根本不动、右键也进不了右栏（M9 实测踩到）。
             else if (::quickOp.isInitialized && quickOp.isOpen) keysNone
@@ -1342,6 +1399,8 @@ class MainActivity : AppCompatActivity() {
         if (agreementGate != null) return           // 使用须知没同意前手势不生效
         if (groupManageView != null) return         // 分组管理抽屉开着时不生效
         if (dlnaView != null) return                // 投屏抽屉开着时不生效
+        if (epgSourceView != null) return           // v1.8：节目单管理抽屉开着时不生效
+        if (updateProgress != null) return          // v1.8：更新下载进度层在屏时不生效
         if (panel.visibility == View.VISIBLE) return
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastSwipeAt < 500L) return        // 防抖：连续 fling 只认第一次
@@ -1374,6 +1433,13 @@ class MainActivity : AppCompatActivity() {
             closeDlnaCast()
             return
         }
+        // v1.8：节目单管理抽屉开着时，点面板以外 = 关抽屉
+        if (epgSourceView != null) {
+            closeEpgSourceManage()
+            return
+        }
+        // v1.8：更新下载进度层是模态的，点画面不穿透
+        if (updateProgress != null) return
         if (panel.visibility == View.VISIBLE) {
             if (hitPanel(x, y)) resetAutoHide() else hidePanel()
         } else if (x < resources.displayMetrics.widthPixels * 0.32f) {
@@ -1593,14 +1659,12 @@ class MainActivity : AppCompatActivity() {
                 // 问题 6：真正可用的分组管理（原来只弹一句 Snackbar）
                 onGroupManage = { showGroupManage(counterpart = false) }
                 onGroupManageAll = { showGroupManage(counterpart = true) }
-                // v1.6：应用升级通道（此前「检查更新」只弹一句"已推迟"）
+                // v1.6：应用升级通道（v1.8 起入口从「更新」分类移到「应用」分类）
                 onCheckUpdate = { checkForUpdate() }
-                // 问题 7：自定义节目单（原来这一行没有任何 onClick）
-                onCustomEpg = { customEpgDialog() }
-                // ⚠️ v1.6：这里原本还有一行 `onCheckUpdate = { Snackbar.show("…M12 已推迟…") }`，
-                // 它写在上面那行**之后**，把真正的检查更新覆盖掉了 —— 表现为"点了没反应/只弹一句提示"。
-                // 已删除，只保留 v1.6 的 `checkForUpdate()`。
-                onPackages = { Snackbar.show("安装包管理：暂未实现（本应用是侧载分发，无需包管理）", this@MainActivity) }
+                // v1.8：节目单管理（内置 + 自定义，可切换 / 删除 / 添加）
+                onCustomEpg = { showEpgSourceManage() }
+                // v1.8：播放器 UA 录入（原来那一行只能看不能改）
+                onEditUa = { editUaDialog() }
                 onResetAll = {
                     Prefs.resetAll(this@MainActivity)
                     Snackbar.show("已恢复初始化，重启后生效", this@MainActivity)
@@ -1615,6 +1679,11 @@ class MainActivity : AppCompatActivity() {
           root.addView(epgProgress, FrameLayout.LayoutParams(
               ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
           ).apply { gravity = Gravity.BOTTOM or Gravity.START; bottomMargin = s(76f); leftMargin = s(28f) })
+
+          // v1.8：调试叠加层（FPS / 播放器信息 / 布局网格，由设置页「调试」三项控制）
+          debugOverlay = DebugOverlayView(this)
+          root.addView(debugOverlay, FrameLayout.LayoutParams(
+              ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
           setContentView(root)
     }
@@ -1660,12 +1729,16 @@ class MainActivity : AppCompatActivity() {
                   lastFocusInChannelColumn = true
               }
             onChannelLongClick = { ch ->
-                // 问题 4：长按 = 收藏（唯一语义）。此前 keysPanelExpanded 还绑了 onLongSelect，
-                // 于是"长按收藏"的同时又弹出快捷功能菜单。已解绑，这里补一行日志便于无 adb 核对。
+                // 问题 4：长按 = 收藏（唯一语义）。
                 // 问题 5：连线路一起快照，换订阅源后收藏依然可用。
-                val added = Prefs.toggleFavorite(this@MainActivity, ch)
-                UiLog.i("界面", "长按收藏：${ch.name} → ${if (added) "已收藏" else "已取消收藏"}")
-                showBottomStatus(if (added) "已收藏：${ch.name}" else "已取消收藏：${ch.name}")
+                // v1.8：设置页「收藏启用」关掉时，长按不再收藏（否则开关形同虚设）。
+                if (!Prefs.iptvChannelFavoriteEnable(this@MainActivity)) {
+                    Snackbar.show("收藏功能已在设置里关闭", this@MainActivity)
+                } else {
+                    val added = Prefs.toggleFavorite(this@MainActivity, ch)
+                    UiLog.i("界面", "长按收藏：${ch.name} → ${if (added) "已收藏" else "已取消收藏"}")
+                    showBottomStatus(if (added) "已收藏：${ch.name}" else "已取消收藏：${ch.name}")
+                }
             }
           }
           epgColumn = EpgColumnView(this).apply {
@@ -2082,15 +2155,69 @@ class MainActivity : AppCompatActivity() {
     /**
      * 抓取直播源正文。
      *
-     * 两级回落（v1.6，针对真机反馈「其他订阅源加载不出来」）：
-     *  ① **协议回落**：`https` 握手失败时，把协议换成 `http` 再试一次。
-     *     IPTV 源大量同时监听 80/443，而旧设备（API 19）的 TLS 栈对现代 CDN 很不友好
-     *     —— 换 http 往往直接就通了。
-     *  ② 两级都会把「为什么失败」原样带回来给用户看，不再只是一句"解析为空"。
+     * 三级能力（v1.8 把设置页里两处「摆设」接上）：
+     *  ① **本地缓存**（「直播源缓存时间」）：`cacheTime > 0` 且缓存未过期时直接返回，不碰网络；
+     *     默认 0 = 不缓存，行为与改动前一致。对应原版 `IptvRepository(cacheTime)`。
+     *  ② **重试**（「HTTP请求重试次数 / 重试间隔」）：整条抓取链失败后按设置重试；
+     *     只对**瞬时故障**（读超时 / 连接重置 / 空响应）重试 —— 握手失败、域名解析不了、
+     *     HTTP 4xx 这类确定性错误重试只是白等（老设备一次超时就是 15 秒）。
+     *  ③ **协议回落**（v1.6）：`https` 失败时换 `http` 再试一次。
      *
      * @return (正文, 失败原因)；成功时原因为 null。
      */
     private fun fetchSourceBody(url: String): Pair<String, String?> {
+        // ① 缓存：cacheTime>0 时命中未过期缓存直接返回
+        val cacheTime = Prefs.iptvSourceCacheTime(this)
+        val cache = if (cacheTime > 0L) {
+            top.yogiczy.mytv.legacy.data.FileCache(
+                java.io.File(cacheDir, "iptv"),
+                "source-" + url.hashCode().toUInt().toString(16) + ".txt",
+            )
+        } else null
+        if (cache != null) {
+            val cached = cache.read()
+            if (!cached.isNullOrBlank() &&
+                System.currentTimeMillis() - cache.lastModified() < cacheTime
+            ) {
+                android.util.Log.i("源加载", "命中缓存（${cacheTime / 1000} 秒内）")
+                return cached to null
+            }
+        }
+
+        // ② 重试
+        val attempts = Prefs.httpRetryCount(this).coerceIn(1, 5)
+        val interval = Prefs.httpRetryInterval(this).coerceIn(0, 10_000).toLong()
+        var last: Pair<String, String?> = "" to "未开始"
+        for (i in 1..attempts) {
+            last = fetchSourceBodyOnce(url)
+            if (last.first.isNotBlank()) break
+            if (i >= attempts || !isRetryableSourceError(last.second)) break
+            android.util.Log.i("源加载", "第 $i/$attempts 次抓取失败（${last.second}）→ ${interval}ms 后重试")
+            if (interval > 0) runCatching { Thread.sleep(interval) }
+        }
+
+        // 成功后写缓存（下次在 cacheTime 内直接命中）
+        if (cache != null && last.first.isNotBlank()) cache.write(last.first)
+        return last
+    }
+
+    /**
+     * 失败原因是否值得重试。
+     *
+     * 判据是失败原因里的异常类名（[Http.open] 会把原异常包成 `HttpError` 的中文消息，
+     * 类名保留在括号里）。只有「超时 / 连接被重置 / 空响应」算瞬时故障；
+     * TLS 握手失败、域名解析失败、HTTP 4xx 都是确定性的，重试无意义。
+     */
+    private fun isRetryableSourceError(reason: String?): Boolean {
+        if (reason.isNullOrBlank()) return true          // 无异常但正文为空 → 值得再试
+        return reason.contains("SocketTimeoutException") ||
+            reason.contains("SocketException") ||
+            reason.contains("ConnectionShutdownException") ||
+            reason.contains("响应为空")
+    }
+
+    /** 单次抓取链：首选协议一次，失败再回落 http 一次。 */
+    private fun fetchSourceBodyOnce(url: String): Pair<String, String?> {
         val first = fetchOnce(url)
         if (first.first.isNotBlank()) return first
 
@@ -2152,7 +2279,11 @@ class MainActivity : AppCompatActivity() {
         navEntries.clear()
 
         navEntries += NavEntry(NAV_SWITCH_SOURCE, R.drawable.ic_swap, null, null)
-        navEntries += NavEntry(NAV_FAVORITE, R.drawable.ic_star, null, null)
+        // v1.8：设置页「收藏启用」在这里真实生效 —— 关掉后导航列不再出现「我的收藏」，
+        // 长按也不再能收藏（见 onChannelLongClick）。之前这个开关只是往 Prefs 写值。
+        if (Prefs.iptvChannelFavoriteEnable(this)) {
+            navEntries += NavEntry(NAV_FAVORITE, R.drawable.ic_star, null, null)
+        }
         filtered.forEach { g ->
             val logo = when {
                 g.name.contains("央视") -> "CCTV1"
@@ -2406,34 +2537,102 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 问题 7：自定义节目单。
+     * v1.8：节目单管理抽屉（对应原版 1.7 的 `EpgSourceScreen`）。
      *
-     * 原版 1.7 的这一项打开 `EpgSourceScreen`（一份可选的节目单来源列表 + 新增）。
-     * 本工程按「等价的录入入口」实现：输入名称与 XMLTV 地址 → 记入用户自定义节目单列表
-     * 并立即切为当前来源、重拉节目单。**差异已在报告中标注为「接受近似」**：
-     * 暂未做 1.7 那种「多来源列表 + 逐条删除」的管理界面。
+     * 列表 = 内置节目单 + 用户自定义；点击切换、长按/删除键删除自定义、末项添加新的。
+     * 切换后立刻按新节目单重拉（[fetchEpg]）。
      */
-    private fun customEpgDialog() {
-        val built = AppDialog.buildInput(
-            this, "自定义节目单", "名称，例如：备用节目单", "XMLTV / e.xml 地址",
-            okLabel = "保存",
-            onCancel = { closeAppDialog() },
-            onOk = { name, url ->
-                if (url.isBlank()) {
-                    showBottomStatus("地址不能为空")
-                } else {
-                    val src = EpgSource(name.ifBlank { url }, url)
-                    Prefs.setEpgSourceList(
-                        this, (Prefs.epgSourceList(this) + src).distinctBy { it.url })
-                    Prefs.setEpgSourceCurrent(this, src)
+    private fun showEpgSourceManage() {
+        closeEpgSourceManage()
+        val view = EpgSourceView(this)
+        epgSourceView = view
+        val current = Prefs.epgSourceCurrent(this)
+        val custom = Prefs.epgSourceList(this)
+        view.onClose = { closeEpgSourceManage() }
+        view.onSelect = { src ->
+            if (src.url != current.url) {
+                Prefs.setEpgSourceCurrent(this, src)
+                UiLog.i("节目单", "切换到节目单：${src.name}")
+                closeEpgSourceManage()
+                fetchEpg()
+            } else {
+                closeEpgSourceManage()
+            }
+        }
+        view.onDelete = { src ->
+            Prefs.setEpgSourceList(this, custom.filterNot { it.url == src.url })
+            UiLog.i("节目单", "删除自定义节目单：${src.name}")
+            closeEpgSourceManage()
+            showEpgSourceManage()   // 重开以刷新列表
+        }
+        view.onAdd = {
+            val built = AppDialog.buildInput(
+                this, "添加自定义节目单", "名称，例如：备用节目单", "XMLTV / e.xml 地址",
+                okLabel = "保存",
+                onCancel = { closeAppDialog() },
+                onOk = { name, url ->
                     closeAppDialog()
-                    runCatching { settings.refreshNow() }
-                    fetchEpg()
-                    Snackbar.show("节目单来源已切换：${src.name}", this)
-                }
+                    if (url.isBlank()) {
+                        showBottomStatus("地址不能为空")
+                    } else {
+                        val src = EpgSource(name.ifBlank { url }, url)
+                        Prefs.setEpgSourceList(this, custom + src)
+                        Prefs.setEpgSourceCurrent(this, src)
+                        UiLog.i("节目单", "新增自定义节目单：${src.name}")
+                        closeEpgSourceManage()
+                        fetchEpg()
+                    }
+                },
+            )
+            showAppDialog(built)
+        }
+        view.show {
+            val rows = ArrayList<EpgSourceView.Row>()
+            // 内置在前（不可删），自定义在后（可删）—— 与原版 `EPG_SOURCE_LIST + 自定义` 同序
+            Prefs.EPG_SOURCE_LIST.forEach { src ->
+                rows += EpgSourceView.Row(src, src.url == current.url, deletable = false)
+            }
+            custom.forEach { src ->
+                rows += EpgSourceView.Row(src, src.url == current.url, deletable = true)
+            }
+            rows
+        }
+        rootView.addView(view, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    }
+
+    private fun closeEpgSourceManage() {
+        val v = epgSourceView ?: return
+        (v.parent as? ViewGroup)?.removeView(v)
+        epgSourceView = null
+    }
+
+    /** 「播放器自定义UA」录入（v1.8：原来那一行只能看不能改）。 */
+    private fun editUaDialog() {
+        val built = AppDialog.buildSingleInput(
+            this, "播放器自定义UA", "留空恢复默认 UA",
+            initial = Prefs.videoPlayerUserAgent(this),
+            onCancel = { closeAppDialog() },
+            onOk = { value ->
+                closeAppDialog()
+                val ua = value.ifBlank { "" }
+                Prefs.setVideoPlayerUserAgent(this, ua)
+                UiLog.i("设置", "播放器UA → ${ua.ifBlank { "（默认）" }}")
+                Snackbar.show("播放器UA 已保存，下次换台生效", this)
             },
         )
         showAppDialog(built)
+    }
+
+    /** 调试项的「播放器信息」文本（解码器 / 分辨率 / 网速 / 线路）。 */
+    private fun playerDebugText(): String {
+        if (!::player.isInitialized) return "播放器未初始化"
+        return buildString {
+            append("解码器：").append(player.lastDecoderName).append('\n')
+            append("分辨率：").append(resolutionLabel() ?: "-").append('\n')
+            append("网速：").append(player.speedKBps).append(" KB/s\n")
+            append("线路：").append(player.currentLineIdx + 1).append('/').append(player.lineCount)
+        }
     }
 
     private fun addSourceDialog() {
@@ -2456,12 +2655,32 @@ class MainActivity : AppCompatActivity() {
 
     // ---------------- 应用升级通道（v1.6，补齐此前推迟的 M11/M12） ----------------
 
-    /** 设置 → 更新 → 检查更新。 */
+    /**
+     * v1.8：启动后的**静默**检查更新（由设置页「升级提醒」控制）。
+     *
+     * 与 [checkForUpdate]（用户手动点「检查更新」）的区别：失败、超时、已是最新都**不打扰**用户，
+     * 只有确实有新版才弹确认框。延迟 8 秒再跑，避开首帧加载抢带宽。
+     */
+    private fun checkStartupUpdate() {
+        handler.postDelayed({
+            if (isFinishing || isDestroyed) return@postDelayed
+            Thread {
+                val (info, err) = UpdateRepository.check(UpdateRepository.LINE_AUTO)
+                android.util.Log.i("检查更新", "启动自动检查：${info?.versionName ?: "无"} / ${err ?: "无错误"}")
+                if (info != null && info.isNewerThanCurrent() && !isFinishing && !isDestroyed) {
+                    handler.post { if (!isFinishing && !isDestroyed) showUpdateDialog(info) }
+                }
+            }.start()
+        }, 8_000L)
+    }
+
+    /** 设置 → 应用 → 检查更新（v1.8：入口从「更新」分类移到这里）。 */
     private fun checkForUpdate() {
         showBottomStatus("正在检查更新…", sticky = true)
-        val line = Prefs.updateDownloadLine(this)
         Thread {
-            val (info, err) = UpdateRepository.check(line)
+            // v1.8：线路改为**自动**（raw → 镜像，谁通走谁），设置里不再让用户手动选
+            // （用户原话："更新通道怎么有三个？一个就好"）。
+            val (info, err) = UpdateRepository.check(UpdateRepository.LINE_AUTO)
             handler.post {
                 when {
                     err != null -> showBottomStatus("检查更新失败：$err", sticky = true)
@@ -2492,30 +2711,69 @@ class MainActivity : AppCompatActivity() {
         showAppDialog(built)
     }
 
-    /** 下载安装包（后台线程 + 底栏进度），完成后拉起系统安装器。 */
+    /**
+     * 下载安装包（v1.8：改为**可见的进度层**）。
+     *
+     * 之前只把百分比写进底栏那一行文字里，而底栏在面板收起时常常不可见 ——
+     * 用户的感受就是"点了更新什么都没发生"。现在弹出 [UpdateProgressView]：
+     * 进度条 + 百分比 + 已下载/总大小 + 「取消」；下载完成后按钮变「安装」，
+     * 由用户点一下再拉起系统安装器。
+     */
     private fun downloadUpdate(info: UpdateRepository.UpdateInfo) {
-        showBottomStatus("正在下载更新…", sticky = true)
-        val line = Prefs.updateDownloadLine(this)
+        val view = UpdateProgressView(this)
+        updateProgress = view
+        view.setProgress(0, 0L, info.sizeBytes)
+        view.onCancel = {
+            cancelUpdateDownload = true
+            closeUpdateProgress()
+            showBottomStatus("已取消更新下载")
+        }
+        view.onInstall = {
+            closeUpdateProgress()
+            pendingInstallApk?.let { installApk(it) }
+        }
+        rootView.addView(view, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        UiLog.i("界面", "开始下载更新：${info.versionName}（${UpdateRepository.humanSize(info.sizeBytes)}）")
+
+        cancelUpdateDownload = false
+        pendingInstallApk = null
         Thread {
             var lastPercent = -1
-            val (file, err) = UpdateRepository.download(this, info, line) { p ->
-                if (p < 0f) return@download
+            val (file, err) = UpdateRepository.download(this, info, UpdateRepository.LINE_AUTO) { p ->
+                if (cancelUpdateDownload) return@download false
+                if (p < 0f) return@download true
                 val percent = (p * 100).toInt()
-                // 节流：只在整数百分比变化时回主线程刷新，避免每 64KB 刷一次底栏
+                // 节流：只在整数百分比变化时回主线程刷新
                 if (percent != lastPercent) {
                     lastPercent = percent
-                    handler.post { showBottomStatus("正在下载更新… $percent%", sticky = true) }
+                    val downloaded = (info.sizeBytes * p).toLong()
+                    handler.post { updateProgress?.setProgress(percent, downloaded, info.sizeBytes) }
                 }
+                true
             }
             handler.post {
                 if (file == null) {
-                    showBottomStatus("更新下载失败：$err", sticky = true)
+                    updateProgress?.setFailed(err ?: "下载失败")
+                    UiLog.w("界面", "更新下载失败：$err")
                 } else {
-                    showBottomStatus("更新已下载，正在拉起安装…")
-                    installApk(file)
+                    pendingInstallApk = file
+                    updateProgress?.setFinished(file.name)
+                    UiLog.i("界面", "更新下载完成：${file.name}")
                 }
             }
         }.start()
+    }
+
+    /** 用户点了「取消」。 */
+    private var cancelUpdateDownload = false
+    /** 下载完成、等待用户点「安装」的文件。 */
+    private var pendingInstallApk: java.io.File? = null
+
+    private fun closeUpdateProgress() {
+        val v = updateProgress ?: return
+        (v.parent as? ViewGroup)?.removeView(v)
+        updateProgress = null
     }
 
     /**
@@ -2713,9 +2971,11 @@ class MainActivity : AppCompatActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         gate.bringToFront()
         gate.post {
-            // 找到「已阅读并同意」按钮给它焦点（AgreementView 构造时已 requestFocus，
-            // 但刚 addView 时可能还没完成布局，这里补一发）
-            runCatching { gate.requestFocus() }
+            // v1.8 修复：焦点必须落在**「已阅读并同意」按钮**上，而不是根覆盖层。
+            // 原来这里写的是 `gate.requestFocus()` —— 结果是遥控器确认键落在根节点上、
+            // 什么都不发生，没有触屏的老盒子会被永久卡在《使用须知》这一屏（模拟器实测）。
+            // AgreementView 构造时的 requestFocus 因视图未入树而无效，必须在 addView 之后补。
+            runCatching { gate.focusDefault() }
         }
         UiLog.i("界面", "《使用须知》：显示（首次启动）")
     }

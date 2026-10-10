@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    纯代码构建 UI 时用于「按 id 找回某个子视图」的 id 定义。
+    API 19 也可用；不用 View.generateViewId() 是为了让 XML 与代码有一份可对照的清单。
+-->
+<resources>
+    <!-- 节目单管理列表项右侧的「使用中」状态标签（EpgSourceView 增量刷新用） -->
+    <item name="epg_src_status" type="id" />
+</resources>

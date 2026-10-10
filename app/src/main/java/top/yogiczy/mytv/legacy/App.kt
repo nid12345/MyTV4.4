@@ -81,7 +81,7 @@ class App : MultiDexApplication() {
  *    （M0 之前它就停在 "0.3.1-legacy"，比实际版本落后三个版本）。
  */
 object BuildConfigCompat {
-    const val VERSION_NAME = "1.7-legacy.12"
+    const val VERSION_NAME = "1.8-legacy.13"
 
     /**
      * 版本序号（单调递增）。
@@ -89,6 +89,9 @@ object BuildConfigCompat {
      * ⚠️ 与 `app/build.gradle.kts` 的 `defaultConfig.versionCode` **必须一致**：
      * 「检查更新」就是拿它跟远端 `update/version.json` 里的 `versionCode` 比大小，
      * 两边不一致会出现"永远提示有新版本"或"新版不提示"（原版 1.7 也是用 versionCode 比较）。
+     *
+     * ⚠️ v1.8 修正：v1.7 时这里停在 11，而 gradle 已到 12 —— 结果「检查更新」在 v1.7 上
+     * 永远认为远端(12)比本地(11)新，每次都会弹更新框。现在两边都是 13。
      */
-    const val VERSION_CODE = 11
+    const val VERSION_CODE = 13
 }

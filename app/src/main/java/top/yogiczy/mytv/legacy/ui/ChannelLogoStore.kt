@@ -283,6 +283,12 @@ object ChannelLogoStore {
     fun bitmapFor(ctx: Context, channelName: String, remoteUrl: String?): Bitmap? {
         if (channelName.isBlank()) return null
 
+        // ⚠️ v1.8：设置页「台标显示」开关在这里统一生效 —— 关闭时**所有位置**
+        // （频道列表卡片 / 右上台标 / 换台信息块）都不再加载台标。
+        // 之前那个开关只是往 Prefs 里写了个值，没有任何地方读它（用户："纯粹是摆设按钮"）。
+        // 放在这一层而不是每个调用点，是为了保证"关就全关"，不会出现只关了一半。
+        if (!top.yogiczy.mytv.legacy.data.Prefs.uiShowChannelLogo(ctx)) return null
+
         // ① 内置：直接同步返回，断网也有台标
         match(ctx, channelName)?.let { builtin ->
             load(ctx, builtin)?.let { return it }
@@ -307,6 +313,7 @@ object ChannelLogoStore {
      * 界面就永远刷不出台标（问题 5 的第二个坑）。
      */
     fun cachedBitmapFor(ctx: Context, channelName: String, remoteUrl: String?): Bitmap? {
+        if (!top.yogiczy.mytv.legacy.data.Prefs.uiShowChannelLogo(ctx)) return null
         match(ctx, channelName)?.let { builtin ->
             load(ctx, builtin)?.let { return it }
         }

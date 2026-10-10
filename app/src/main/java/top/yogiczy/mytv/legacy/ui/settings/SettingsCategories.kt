@@ -6,8 +6,12 @@ import top.yogiczy.mytv.legacy.R
 /**
  * 设置页的分类（顺序固定）。
  *
- * 原样移植自 `SettingsCategories.kt`（MyTV 1.7，tag custom-v1.7），
- * **问题 8 按要求删除了一项**：`EPG_RESERVE("预约")` —— 从 13 项变为 12 项。
+ * 原样移植自 `SettingsCategories.kt`（MyTV 1.7，tag custom-v1.7），三处**用户授权**调整：
+ *  1. v1.x 删除 `EPG_RESERVE("预约")`（13 → 12 项）；
+ *  2. **v1.8 删除 `UPDATE("更新")`** —— 用户要求「更新入口放到应用里」，
+ *     原「更新」分类的三项合并进 [APP]（见 `SettingsCats.app`）；
+ *  3. **v1.8 删除 `MORE("推送")`** —— 用户明确「推送入口没啥用，去掉」
+ *     （原版那一项只有"安装包管理"，本工程是侧载分发，本来就没这东西）。
  *
  * ⚠️ **图标是替代方案**：原版用的是 Compose Material Icons（ImageVector），
  * 本工程没有 material-icons 依赖，也不允许引入新依赖，因此改为手绘的
@@ -38,12 +42,10 @@ enum class SettingsCategory(
     EPG("节目单", R.drawable.ic_set_epg),
     UI("界面", R.drawable.ic_set_ui),
     FAVORITE("收藏", R.drawable.ic_set_favorite),
-    UPDATE("更新", R.drawable.ic_set_update),
     VIDEO_PLAYER("播放器", R.drawable.ic_set_player),
     HTTP("网络", R.drawable.ic_set_http),
     DEBUG("调试", R.drawable.ic_set_debug),
     LOG("日志", R.drawable.ic_set_log),
-    MORE("推送", R.drawable.ic_set_more),
     ;
 
     companion object {

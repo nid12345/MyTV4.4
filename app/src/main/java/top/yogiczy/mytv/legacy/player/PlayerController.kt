@@ -128,8 +128,12 @@ class PlayerController(private val context: Context) {
             initializationDurationMs: Long,
         ) {
             UiLog.i(TAG, "视频解码器=$decoderName 初始化耗时=${initializationDurationMs}ms")
+            lastDecoderName = decoderName
         }
     }
+
+    /** 最近一次实际使用的视频解码器名（v1.8：给「显示播放器信息」调试项用）。 */
+    var lastDecoderName: String = "-"
 
     private var exoPlayer: ExoPlayer = buildPlayer(false)
 
@@ -463,7 +467,10 @@ class PlayerController(private val context: Context) {
         liveSeekRetried = false
 
         runCatching {
-            exoPlayer.stop()
+            // v1.8：设置页「停止上一媒体项」在这里真实生效（原版 `Configs.videoPlayerStopPreviousMediaItem`
+            // 就是这个语义）。之前这一行是无条件 stop()，开关形同摆设。
+            // 关掉后换台略快（不清空解码器队列），打开则换台更干净。
+            if (Prefs.videoPlayerStopPreviousMediaItem(context)) exoPlayer.stop()
             exoPlayer.clearMediaItems()
             exoPlayer.setMediaSource(source)
             exoPlayer.prepare()

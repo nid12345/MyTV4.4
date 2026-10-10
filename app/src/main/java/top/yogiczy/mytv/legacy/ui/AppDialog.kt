@@ -98,8 +98,42 @@ object AppDialog {
     }
 
     /**
-     * 多按钮 + 长正文对话框（v1.6 「检查更新」用）。
-     *
+     * 单输入框对话框（v1.8：设置页「播放器自定义UA」用它，
+     * 之前那一行只能看不能改，等于摆设）。
+     */
+    fun buildSingleInput(
+        ctx: Context,
+        title: String,
+        hint: String,
+        initial: String = "",
+        okLabel: String = "保存",
+        onCancel: () -> Unit,
+        onOk: (String) -> Unit,
+    ): Built {
+        val overlay = overlay(ctx)
+        val panel = panel(ctx)
+        panel.addView(titleView(ctx, title))
+
+        val input1 = input(ctx, hint).apply {
+            setText(initial)
+            setSelection(initial.length)
+        }
+        panel.addView(input1, lp(dp(ctx, 14f)))
+
+        val buttons = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END }
+        buttons.addView(button(ctx, "取消", onCancel))
+        buttons.addView(button(ctx, okLabel) {
+            onOk(input1.text.toString().trim())
+        }, LinearLayout.LayoutParams(WRAP, WRAP).apply { marginStart = dp(ctx, 8f) })
+        panel.addView(buttons, lp(dp(ctx, 16f)).apply { gravity = Gravity.END })
+
+        overlay.addView(panel, FrameLayout.LayoutParams(panelWidth(ctx), WRAP)
+            .apply { gravity = Gravity.CENTER })
+        return Built(overlay, input1)
+    }
+
+    /** 多按钮 + 长正文对话框（v1.6 「检查更新」用）。
+
      * 与 [buildConfirm] 的差别：正文可多行滚动、按钮数量与文案由调用方给（更新弹窗既要
      * 「立即更新 / 稍后」，下载完又要「安装 / 取消」，同一套壳复用）。
      */
@@ -119,12 +153,18 @@ object AppDialog {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setLineSpacing(UiKit.dp(ctx, 4f).toFloat(), 1f)
         }
+        // ⚠️ v1.8 修复「触屏上更新弹窗划不动、按钮点不到」：
+        //   原来 ScrollView 高度是 WRAP —— 它会被内容撑到和正文一样高，
+        //   于是"永远不需要滚动"，正文一长就把按钮顶到屏幕外，触屏够不着、划也划不动。
+        //   现在给它一个**固定高度**（屏高 45%，上限 300dp），超出即滚动，
+        //   按钮行始终留在屏幕内。
         val scroll = android.widget.ScrollView(ctx).apply {
             addView(body)
-            isVerticalScrollBarEnabled = false
+            isVerticalScrollBarEnabled = true
+            isScrollbarFadingEnabled = false
         }
         panel.addView(scroll, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, WRAP
+            ViewGroup.LayoutParams.MATCH_PARENT, bodyMaxHeight(ctx)
         ).apply { topMargin = dp(ctx, 10f) })
 
         val bar = LinearLayout(ctx).apply {
@@ -161,6 +201,10 @@ object AppDialog {
         setBackgroundColor(UiKit.withAlpha(0xFF000000.toInt(), 0.55f))
         isClickable = true
         isFocusable = true
+        // v1.8：让**子控件优先**取焦。默认的 FOCUS_BEFORE_DESCENDANTS 会让宿主
+        // `built.firstFocus.requestFocus()` 的结果被遮罩根节点截胡，焦点停在遮罩上 ——
+        // 遥控器要按一次方向键才进到按钮/输入框，触屏用户则完全看不到焦点在哪。
+        descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
     }
 
     /** 居中面板：深色圆角。 */
@@ -174,6 +218,12 @@ object AppDialog {
     private fun panelWidth(ctx: Context): Int {
         val screen = ctx.resources.displayMetrics.widthPixels
         return minOf((screen * 0.80f).toInt(), dp(ctx, 560f))
+    }
+
+    /** 正文最大高度：屏高 45%，上限 300dp —— 保证按钮行永远留在屏幕内（见 [buildMessage]）。 */
+    private fun bodyMaxHeight(ctx: Context): Int {
+        val screenH = ctx.resources.displayMetrics.heightPixels
+        return minOf((screenH * 0.45f).toInt(), dp(ctx, 300f))
     }
 
     private fun titleView(ctx: Context, title: String) = TextView(ctx).apply {

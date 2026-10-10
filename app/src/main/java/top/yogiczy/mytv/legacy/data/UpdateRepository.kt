@@ -48,6 +48,16 @@ object UpdateRepository {
     private const val BRANCH = "main"
     private const val MANIFEST_PATH = "update/version.json"
 
+    /**
+     * v1.8：更新线路**只有一条「自动」**。
+     *
+     * 之前设置页里有「下载线路 auto / ghproxy / jsdelivr」三档让用户选，
+     * 用户反馈"更新通道怎么有三个？" —— 那三档本来就是**同一条链路上不同顺序的候选**，
+     * 交给用户选没有意义：[check] 与 [download] 本来就会**按序逐个试，谁通走谁**。
+     * 现在固定用 AUTO，设置项删除，行为不变（依然是"自动挑能用的那个"）。
+     */
+    const val LINE_AUTO = "auto"
+
     /** ghproxy 类加速前缀（按可用性排序；国内直连 raw.githubusercontent 常年不稳）。 */
     private val GH_PROXIES = listOf(
         "https://ghfast.top/",
@@ -97,14 +107,15 @@ object UpdateRepository {
     /**
      * 下载安装包。
      *
-     * @param onProgress 形参为 0f..1f（-1 表示总长度未知）；回调在**后台线程**
+     * @param onProgress 形参为 0f..1f（-1 表示总长度未知），回调在**后台线程**；
+     *        返回 `false` 表示用户取消 —— 立即中止下载，本函数返回 `(null, "已取消")`。
      * @return (文件, 错误原因)
      */
     fun download(
         ctx: Context,
         info: UpdateInfo,
         line: String,
-        onProgress: (Float) -> Unit,
+        onProgress: (Float) -> Boolean,
     ): Pair<File?, String?> {
         val dir = File(ctx.getExternalFilesDir(null), "update").apply { mkdirs() }
         val target = File(dir, "MyTV4.4-${info.versionName}.apk")
@@ -115,6 +126,7 @@ object UpdateRepository {
         }
 
         val errors = ArrayList<String>()
+        var cancelled = false
         for (url in downloadUrls(info.url, line)) {
             val ok = runCatching {
                 Http.client(connectTimeoutMs = 20_000L, readTimeoutMs = 120_000L, userAgent = PlayerController.UA)
@@ -132,8 +144,15 @@ object UpdateRepository {
                                 if (n <= 0) break
                                 out.write(buf, 0, n)
                                 read += n
-                                onProgress(if (total > 0) (read.toFloat() / total) else -1f)
+                                if (!onProgress(if (total > 0) (read.toFloat() / total) else -1f)) {
+                                    cancelled = true
+                                    break
+                                }
                             }
+                        }
+                        if (cancelled) {
+                            tmp.delete()
+                            throw Http.HttpError("已取消")
                         }
                         if (tmp.length() <= 0L) throw Http.HttpError("下载内容为空")
                         if (target.exists()) target.delete()
@@ -150,6 +169,7 @@ object UpdateRepository {
                 Log.i(TAG, "下载完成：${target.absolutePath} (${target.length()} 字节)")
                 return target to null
             }
+            if (cancelled) return null to "已取消"
             errors.add("${hostOf(url)}：${ok.exceptionOrNull()?.message ?: "下载失败"}")
             Log.w(TAG, "下载失败 $url -> ${ok.exceptionOrNull()?.message}")
         }

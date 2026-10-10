@@ -37,16 +37,23 @@ object SettingsCats {
         )
     }
 
-    // ---------- 2 应用 ----------
-    fun app(ctx: Context, onReset: () -> Unit): List<SettingsItemView> {
-        val boot = row(ctx, "开机自启", "请确保当前设备支持该功能")
-        boot.setSwitch(Prefs.appBootLaunchEnable(ctx)) {
-            Prefs.setAppBootLaunchEnable(ctx, it)
-        }
-        val upd = row(ctx, "应用更新", null).apply { setValue("M12 已推迟到 v1.1") }
+    /**
+     * 2 应用（v1.8：原「更新」分类整体并入这里 —— 用户要求「更新入口放到应用里」）。
+     *
+     * 「更新通道 / 下载线路」两项已删除：本工程只有一条发布通道，线路改由
+     * [top.yogiczy.mytv.legacy.data.UpdateRepository] **自动探测**（raw → 镜像，谁通走谁），
+     * 不再让用户手动选（用户原话："更新通道怎么有三个？一个就好"）。
+     *
+     * 「开机自启」已删除：本工程没有实现开机广播接收，留着就是纯摆设。
+     */
+    fun app(ctx: Context, onReset: () -> Unit, onCheckUpdate: () -> Unit): List<SettingsItemView> {
+        val check = row(ctx, "检查更新", "从 GitHub Releases 获取最新版本并下载安装")
+        check.onClick = onCheckUpdate
+        val remind = row(ctx, "升级提醒", "启动后自动检查一次更新")
+        remind.setSwitch(Prefs.updateRemindEnable(ctx)) { Prefs.setUpdateRemindEnable(ctx, it) }
         val reset = row(ctx, "恢复初始化", "短按立即清空全部设置")
         reset.onClick = onReset
-        return listOf(boot, upd, reset)
+        return listOf(check, remind, reset)
     }
 
     // ---------- 3 直播源 ----------
@@ -92,15 +99,10 @@ object SettingsCats {
         group.setTailIcon(top.yogiczy.mytv.legacy.R.drawable.ic_swap)
         val allGroup = row(ctx, "全部分组管理", "统一管理所有订阅源的分组显示、隐藏（切换源、重启后保持）")
         allGroup.onClick = onGroupManageAll
-        val hybrid = row(ctx, "混合模式")
-        hybrid.setValue(Prefs.iptvHybridMode(ctx).name)
-        hybrid.onClick = {
-            val modes = top.yogiczy.mytv.legacy.data.IptvHybridMode.values()
-            val next = modes[(modes.indexOf(Prefs.iptvHybridMode(ctx)) + 1) % modes.size]
-            Prefs.setIptvHybridMode(ctx, next)
-            hybrid.setValue(next.name)
-        }
-        l += listOf(noSelect, flip, cache, custom, group, allGroup, hybrid)
+        // v1.8 删除「混合模式」：它给每个频道追加 `hybrid-webview://` 地址（原版靠内置 WebView
+        // 播放器播放），而本工程**没有**实现 hybrid-webview 播放链路（ChannelUtil 里只移植未接线）。
+        // 留着它 = 把不可播的地址塞进线路列表，属于"看着有、实际没用"的摆设。
+        l += listOf(noSelect, flip, cache, custom, group, allGroup)
         return l
     }
 
@@ -139,20 +141,25 @@ object SettingsCats {
         perm.setSwitch(Prefs.uiShowEpgProgrammePermanentProgress(ctx)) {
             Prefs.setUiShowEpgProgrammePermanentProgress(ctx, it)
         }
-        val logo = row(ctx, "台标显示")
-        logo.setSwitch(Prefs.uiShowChannelLogo(ctx)) { Prefs.setUiShowChannelLogo(ctx, it) }
-        val classic = row(ctx, "经典选台界面", "将选台界面替换为经典三段式结构")
-        classic.setSwitch(Prefs.uiUseClassicPanelScreen(ctx)) {
-            Prefs.setUiUseClassicPanelScreen(ctx, it)
-            UiLog.i("设置", "经典选台界面 → $it")
+        // v1.8：「台标显示」已**接通**（见 ChannelLogoStore.bitmapFor：关闭时所有位置的
+        // 台标都不再加载 —— 频道列表、右上台标、换台信息块统一生效）。
+        val logo = row(ctx, "台标显示", "频道列表 / 右上台标 / 换台信息块")
+        logo.setSwitch(Prefs.uiShowChannelLogo(ctx)) {
+            Prefs.setUiShowChannelLogo(ctx, it)
+            UiLog.i("设置", "台标显示 → $it")
         }
-        val time = row(ctx, "时间显示")
-        time.setValue(Prefs.uiTimeShowMode(ctx).name)
+        // v1.8 删除「经典选台界面」：本工程只有经典三段式一种选台界面，没有第二种可切，
+        // 留着就是点了没反应的摆设（用户要求"不要只是摆设按钮"）。
+
+        // v1.8：「时间显示」确认**接通**（DatetimeView / MainActivity.refreshTopRight 按
+        // HIDDEN / ALWAYS / EVERY_HOUR / HALF_HOUR 决定右上时间显隐），切换后立即重绘。
+        val time = row(ctx, "时间显示", "控制右上角时间的显示时机")
+        time.setValue(Prefs.uiTimeShowMode(ctx).label)
         time.onClick = {
             val modes = top.yogiczy.mytv.legacy.data.UiTimeShowMode.values()
             val next = modes[(modes.indexOf(Prefs.uiTimeShowMode(ctx)) + 1) % modes.size]
             Prefs.setUiTimeShowMode(ctx, next)
-            time.setValue(next.name)
+            time.setValue(next.label)
         }
         val close = row(ctx, "超时自动关闭界面", "影响选台界面，快捷操作等界面")
         close.setValue("${Prefs.uiScreenAutoCloseDelay(ctx) / 1000} 秒")
@@ -163,94 +170,62 @@ object SettingsCats {
             close.setValue("${next / 1000} 秒")
         }
         val density = row(ctx, "界面整体缩放比例")
-        density.setValue(Prefs.uiDensityScaleRatio(ctx).toString())
+        // 0f 是原版语义里的「未设置 → 按屏宽自动换算」，显示成 "0.0" 会让人以为坏了。
+        density.setValue(if (Prefs.uiDensityScaleRatio(ctx) == 0f) "自动" else String.format("%.1f", Prefs.uiDensityScaleRatio(ctx)))
         density.onClick = {
             val cur = Prefs.uiDensityScaleRatio(ctx)
             val next = if (cur >= 0.3f) 0f else cur + 0.1f
             Prefs.setUiDensityScaleRatio(ctx, next)
-            density.setValue(next.toString())
+            density.setValue(if (next == 0f) "自动" else String.format("%.1f", next))
         }
         val font = row(ctx, "界面字体缩放比例")
-        font.setValue(Prefs.uiFontScaleRatio(ctx).toString())
+        font.setValue(String.format("%.1f", Prefs.uiFontScaleRatio(ctx)))
         font.onClick = {
             val cur = Prefs.uiFontScaleRatio(ctx)
             val next = if (cur >= 1.5f) 0.8f else cur + 0.1f
             Prefs.setUiFontScaleRatio(ctx, next)
             font.setValue(String.format("%.1f", next))
         }
-        val focus = row(ctx, "焦点优化", "关闭后可解决触摸设备在部分场景下闪退")
-        focus.setSwitch(Prefs.uiFocusOptimize(ctx)) { Prefs.setUiFocusOptimize(ctx, it) }
-        l += listOf(prog, perm, logo, classic, time, close, density, font, focus)
+        // v1.8 删除「焦点优化」：本工程没有原版那套 Compose focusProperties 机制，无对应实现。
+        l += listOf(prog, perm, logo, time, close, density, font)
         return l
     }
 
     // ---------- 7 收藏 ----------
+    /**
+     * v1.8：「收藏启用」已**接通**（关闭后导航列不再出现「我的收藏」，长按也不再能收藏）。
+     * 「收藏换台边界跳出」已删除 —— 见下方说明。
+     */
     fun favorite(ctx: Context, count: Int, onClear: () -> Unit): List<SettingsItemView> {
-        val enable = row(ctx, "收藏启用")
+        val enable = row(ctx, "收藏启用", "关闭后不再显示「我的收藏」分组，也不能新增收藏")
         enable.setSwitch(Prefs.iptvChannelFavoriteEnable(ctx)) {
             Prefs.setIptvChannelFavoriteEnable(ctx, it)
+            UiLog.i("设置", "收藏启用 → $it")
         }
         val cur = row(ctx, "当前已收藏", "跨订阅源保留，切换直播源后依然可以查看与播放")
             .apply { setValue("$count 个") }
         val clear = row(ctx, "清空全部收藏", "短按立即清空全部收藏")
         clear.onClick = onClear
-        val boundary = row(ctx, "收藏换台边界跳出")
-        boundary.setSwitch(Prefs.iptvChannelFavoriteChangeBoundaryJumpOut(ctx)) {
-            Prefs.setIptvChannelFavoriteChangeBoundaryJumpOut(ctx, it)
-        }
-        return listOf(enable, cur, clear, boundary)
+        // v1.8 删除「收藏换台边界跳出」：本工程的收藏是**导航列里的伪分组**，
+        // 上下键换台走的是「全部频道」这条链（changeChannelBy），不存在"在收藏里换到边界"
+        // 这个场景 —— 没有可接的实现，留着就是摆设。
+        return listOf(enable, cur, clear)
     }
 
     // ---------- 8 更新 ----------
-    fun update(ctx: Context, onCheck: () -> Unit): List<SettingsItemView> {
-        val check = row(ctx, "检查更新", "从 GitHub Releases 获取最新版本并安装")
-        check.onClick = onCheck
-        val remind = row(ctx, "升级提醒")
-        remind.setSwitch(Prefs.updateRemindEnable(ctx)) { Prefs.setUpdateRemindEnable(ctx, it) }
-        val force = row(ctx, "更新强提醒")
-        force.setSwitch(Prefs.updateForceRemindEnable(ctx)) {
-            Prefs.setUpdateForceRemindEnable(ctx, it)
-        }
-        val channel = row(ctx, "更新通道")
-        channel.setValue(Prefs.updateChannel(ctx))
-        channel.onClick = {
-            val opts = listOf("stable", "beta", "alpha")
-            val next = opts[(opts.indexOf(Prefs.updateChannel(ctx)) + 1) % opts.size]
-            Prefs.setUpdateChannel(ctx, next)
-            channel.setValue(next)
-        }
-        val line = row(ctx, "下载线路")
-        line.setValue(Prefs.updateDownloadLine(ctx))
-        line.onClick = {
-            val opts = listOf("auto", "ghproxy", "jsdelivr")
-            val next = opts[(opts.indexOf(Prefs.updateDownloadLine(ctx)) + 1) % opts.size]
-            Prefs.setUpdateDownloadLine(ctx, next)
-            line.setValue(next)
-        }
-        return listOf(check, remind, force, channel, line)
-    }
+    // v1.8（用户要求）：整个「更新」分类已删除，三项并入「应用」分类（见 [app]）。
 
     // ---------- 9 播放器 ----------
-    fun videoPlayer(ctx: Context): List<SettingsItemView> {
+    fun videoPlayer(ctx: Context, onEditUa: (() -> Unit)? = null): List<SettingsItemView> {
         val l = ArrayList<SettingsItemView>()
-        val render = row(ctx, "渲染方式")
-        render.setValue(if (Prefs.videoPlayerRenderMode(ctx) == 0) "SurfaceView" else "TextureView")
-        render.onClick = {
-            val next = (Prefs.videoPlayerRenderMode(ctx) + 1) % 2
-            Prefs.setVideoPlayerRenderMode(ctx, next)
-            render.setValue(if (next == 0) "SurfaceView" else "TextureView")
-        }
-        val audioSw = row(ctx, "强制音频软解")
-        audioSw.setSwitch(Prefs.videoPlayerForceAudioSoftwareDecode(ctx)) {
-            Prefs.setVideoPlayerForceAudioSoftwareDecode(ctx, it)
-        }
-        val stopPrev = row(ctx, "停止上一媒体项")
+        // ❶ v1.8 删除的三项（都是原版能力在本工程**不存在**对应实现，留着就是摆设）：
+        //   · 「渲染方式」—— 本工程只有 SurfaceView（API 19 的 TextureView 更卡，没有做）；
+        //   · 「强制音频软解」—— ExoPlayer 2.18 没有独立的"音频软解"开关；
+        //   · 「跳过多帧渲染」—— 那是原版定制 media3 的反射开关，2.18 上没有。
+        val stopPrev = row(ctx, "停止上一媒体项", "打开新频道前先停掉上一个（换台更干净，起播略慢）")
         stopPrev.setSwitch(Prefs.videoPlayerStopPreviousMediaItem(ctx)) {
             Prefs.setVideoPlayerStopPreviousMediaItem(ctx, it)
-        }
-        val skipFrame = row(ctx, "跳过多帧渲染")
-        skipFrame.setSwitch(Prefs.videoPlayerSkipMultiFrame(ctx)) {
-            Prefs.setVideoPlayerSkipMultiFrame(ctx, it)
+            UiLog.i("设置", "停止上一媒体项 → $it")
         }
         val mode = row(ctx, "全局显示模式")
         val modeLabel: (top.yogiczy.mytv.legacy.data.VideoPlayerDisplayMode) -> String = { m ->
@@ -275,8 +250,11 @@ object SettingsCats {
             Prefs.setVideoPlayerLoadTimeout(ctx, next)
             timeout.setValue("$next ms")
         }
+        // v1.8 接通：原来这一行只能看不能改（摆设），现在点开可输入。
         val ua = row(ctx, "播放器自定义UA", Prefs.videoPlayerUserAgent(ctx))
-        l += listOf(render, audioSw, stopPrev, skipFrame, mode, timeout, ua)
+        ua.onClick = { onEditUa?.invoke() }
+        ua.setTailIcon(top.yogiczy.mytv.legacy.R.drawable.ic_swap)
+        l += listOf(stopPrev, mode, timeout, ua)
         return l
     }
 
@@ -301,12 +279,16 @@ object SettingsCats {
     }
 
     // ---------- 11 调试 ----------
+    /**
+     * v1.8：三项全部**接通** —— 由 [top.yogiczy.mytv.legacy.ui.DebugOverlayView] 在画面
+     * 左上角叠加显示（FPS / 播放器信息 / 布局网格），开关即时生效。
+     */
     fun debug(ctx: Context): List<SettingsItemView> {
-        val fps = row(ctx, "显示FPS", "在屏幕左上角显示fps和柱状图")
+        val fps = row(ctx, "显示FPS", "在屏幕左上角显示fps")
         fps.setSwitch(Prefs.debugShowFps(ctx)) { Prefs.setDebugShowFps(ctx, it) }
-        val info = row(ctx, "显示播放器信息", "显示播放器详细信息（编码、解码器、采样率等）")
+        val info = row(ctx, "显示播放器信息", "显示解码器、分辨率、网速等")
         info.setSwitch(Prefs.debugShowPlayerInfo(ctx)) { Prefs.setDebugShowPlayerInfo(ctx, it) }
-        val grid = row(ctx, "显示布局网格")
+        val grid = row(ctx, "显示布局网格", "在画面上叠加对齐网格")
         grid.setSwitch(Prefs.debugShowLayoutGrid(ctx)) { Prefs.setDebugShowLayoutGrid(ctx, it) }
         return listOf(fps, info, grid)
     }
@@ -327,9 +309,6 @@ object SettingsCats {
     }
 
     // ---------- 13 推送 ----------
-    fun push(ctx: Context, onPackages: () -> Unit): List<SettingsItemView> {
-        val pkg = row(ctx, "安装包管理", "安装、删除推送收到的安装包；卸载已装应用")
-        pkg.onClick = onPackages
-        return listOf(pkg)
-    }
+    // v1.8（用户要求）：「推送」分类已删除 —— 原版那一项只有"安装包管理"，
+    // 本工程是侧载分发，本来就没有这东西，留着是个空入口。
 }

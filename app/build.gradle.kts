@@ -16,11 +16,12 @@ android {
         // M0：34 -> 28。IPTV 源大量是 http 明文，targetSdk >= 28 时 API 28+ 设备默认禁明文；
         //      设备本身是 API 19 不受影响，但降到 28 后在新设备上调试不会被拦。
         targetSdk = 28
-        // v1.6 最终版。⚠️ 与 App.kt 的 BuildConfigCompat 必须一致：
+        // v1.8：设置页重排 + 更新链路进度提示 + 节目单管理 + 手势线路循环。
+        // ⚠️ 与 App.kt 的 BuildConfigCompat 必须一致：
         //     versionCode ↔ VERSION_CODE（升级通道用它比大小）
         //     versionName ↔ VERSION_NAME
-        versionCode = 12
-        versionName = "1.7-legacy.12"
+        versionCode = 13
+        versionName = "1.8-legacy.13"
         vectorDrawables { useSupportLibrary = true }
         // minSdk < 21 时 core library desugaring 强制要求 multidex
         multiDexEnabled = true

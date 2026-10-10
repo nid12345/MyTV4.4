@@ -56,7 +56,10 @@ class SettingsView(context: Context) : LinearLayout(context) {
     /** 问题 6：「全部分组管理」（所有订阅源一起管）。 */
     var onGroupManageAll: (() -> Unit)? = null
 
-    /** 问题 7：「自定义节目单」（1.7 里打开 EpgSourceScreen；这里给出等价的录入入口）。 */
+    /** v1.8：「播放器自定义UA」点击后由宿主弹出录入框（原来只能看不能改）。 */
+    var onEditUa: (() -> Unit)? = null
+
+    /** 问题 7：「自定义节目单」（1.7 里打开 EpgSourceScreen；v1.8 改为节目单管理抽屉）。 */
     var onCustomEpg: (() -> Unit)? = null
     var onCheckUpdate: (() -> Unit)? = null
     var onPackages: (() -> Unit)? = null
@@ -67,7 +70,10 @@ class SettingsView(context: Context) : LinearLayout(context) {
         orientation = HORIZONTAL
         setPadding(UiKit.dp(context, 58f), UiKit.dp(context, 24f),
             UiKit.dp(context, 58f), UiKit.dp(context, 24f))
-        background = UiKit.rounded(Palette.background(context), 12f, context)
+        // v1.8（用户要求）：「更多设置点开的设置页没必要四角用圆角，直接全屏底色就好」。
+        // 原来是 `UiKit.rounded(Palette.background(context), 12f, context)` —— 圆角 + 与
+        // 背景同色的实心块，在真机上看就是一块带圆角的贴片。改为**纯色铺满**。
+        setBackgroundColor(Palette.background(context))
         visibility = GONE
 
         val catWrap = ScrollView(context).apply {
@@ -259,7 +265,8 @@ class SettingsView(context: Context) : LinearLayout(context) {
         val ctx = context
         val rows = when (SettingsCategory.ALL[selected]) {
             SettingsCategory.ABOUT -> SettingsCats.about(ctx)
-            SettingsCategory.APP -> SettingsCats.app(ctx) { onResetAll?.invoke() }
+            SettingsCategory.APP -> SettingsCats.app(ctx,
+                { onResetAll?.invoke() }, { onCheckUpdate?.invoke() })
             SettingsCategory.IPTV -> SettingsCats.iptv(ctx,
                 { onCustomSource?.invoke() }, { onGroupManage?.invoke() },
                 { onGroupManageAll?.invoke() })
@@ -273,12 +280,10 @@ class SettingsView(context: Context) : LinearLayout(context) {
                     renderContent()
                 }
             }
-            SettingsCategory.UPDATE -> SettingsCats.update(ctx) { onCheckUpdate?.invoke() }
-            SettingsCategory.VIDEO_PLAYER -> SettingsCats.videoPlayer(ctx)
+            SettingsCategory.VIDEO_PLAYER -> SettingsCats.videoPlayer(ctx) { onEditUa?.invoke() }
             SettingsCategory.HTTP -> SettingsCats.http(ctx)
             SettingsCategory.DEBUG -> SettingsCats.debug(ctx)
             SettingsCategory.LOG -> SettingsCats.log(ctx)
-            SettingsCategory.MORE -> SettingsCats.push(ctx) { onPackages?.invoke() }
         }
         rows.forEach { v ->
             // 复用的成员视图先摘父，否则二次入树必抛
