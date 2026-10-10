@@ -2389,3 +2389,8 @@ Bugly App ID 需注册后填进 `CrashReporter.BUGLY_APP_ID`（QQ 登录 bugly.q
 - `dist/MyTV4.4-v1.18-legacy23.apk`（release **10,944,241 B**，MD5 `e236b5cc24cb2a655ee6f8211c15cebb`，证书 `02e143e8…`）
 - `dist/MyTV4.4-v1.18-legacy23-debug.apk`（debug **13,570,247 B**，MD5 `432a49b3a6ec8c811712e067e18aa008`，zipalign+重签）
 - `update/version.json` → v1.18 清单；交付报告 `dist/v1.18-报告.md`；截图 `dist/evidence/v1.18/`
+- 已发布：Release `v1.18` → https://github.com/nid12345/MyTV4.4/releases/tag/v1.18
+  （两个 APK 均 `uploaded`）；源码 commit **`2af7547`**；
+  线上回验：清单 versionCode 23 / size 10944241 / md5 e236b5cc… 与本地产物一致，
+  从 Release 取回的 APK `cmp` 逐字节相同、badging 与证书 `02e143e8…` 一致
+- ⚠️ 待办：Bugly App ID（用户注册后填 `CrashReporter.BUGLY_APP_ID` 重新出包）
