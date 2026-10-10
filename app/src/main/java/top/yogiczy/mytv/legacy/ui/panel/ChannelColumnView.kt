@@ -49,6 +49,10 @@ class ChannelColumnView(context: Context) : RecyclerView(context) {
             val icon: Drawable? = null,
             val onClick: () -> Unit,
             val onLongClick: (() -> Unit)? = null,
+            /** v1.13 需求 3：完全不留图标位（换源列表用）。 */
+            val noIcon: Boolean = false,
+            /** v1.13 需求 3：行尾角标（如「使用中」）。 */
+            val trailing: String? = null,
         ) : Row()
     }
 
@@ -238,7 +242,10 @@ class ChannelColumnView(context: Context) : RecyclerView(context) {
         private inner class TextVH(private val rowView: PanelRowView) :
             RecyclerView.ViewHolder(rowView) {
             fun bind(item: Row.TextRow) {
-                rowView.bind(item.title, item.subtitle, item.icon, item.onClick, item.onLongClick)
+                rowView.bind(
+                    item.title, item.subtitle, item.icon, item.onClick, item.onLongClick,
+                    noIcon = item.noIcon, trailing = item.trailing,
+                )
                 // 问题 1：订阅列表 / 应用列表也是"二级"，焦点进来同样要把一级白框降透明度
                 rowView.onFocusChanged = { focused -> if (focused) onRowFocused?.invoke() }
                 rowView.visibility = View.VISIBLE

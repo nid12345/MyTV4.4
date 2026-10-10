@@ -200,11 +200,11 @@ object SettingsCats {
             Prefs.setUiTimeShowMode(ctx, next)
             time.setValue(next.label)
         }
-        // v1.11（用户需求 1）：左侧三段式选台面板**不再**受这一项影响 ——
-        // 它现在只在「选中频道 / 按返回键 / 点面板外空白」时收起（详见 MainActivity 里
-        // panelAutoClose 处的注释）。这一项继续作用于快捷菜单、投屏、节目单来源、
-        // 多线路选框、播放控制这五个弹层，所以文案随之收窄。
-        val close = row(ctx, "超时自动关闭界面", "影响快捷菜单、投屏、节目单来源、多线路、播放控制等弹层（选台面板不受影响）")
+        // v1.11：左侧三段式选台面板曾**不再**受这一项影响（用户当时要求"挑台时别自己收"）。
+        // v1.13 用户又要求"除设置菜单外所有菜单/窗口都要自动隐藏"，回问后裁决：
+        //   **面板也收，但用更长的超时** —— 面板固定 15 秒（MainActivity.PANEL_AUTO_CLOSE_MS），
+        //   弹层用这一项（默认 5 秒）。所以这一项仍然**只管弹层**，面板不跟着变。
+        val close = row(ctx, "超时自动关闭界面", "影响快捷菜单、投屏、节目单来源、分组管理、多线路、播放控制等弹层；选台面板固定 15 秒，不受此项影响")
         close.setValue("${Prefs.uiScreenAutoCloseDelay(ctx) / 1000} 秒")
         close.onClick = {
             val cur = Prefs.uiScreenAutoCloseDelay(ctx)

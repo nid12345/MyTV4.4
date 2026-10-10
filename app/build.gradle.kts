@@ -28,11 +28,17 @@ android {
         //        更新下载目录改为多候选 + 真实写入探针（修小米电视更新失败）；
         //        清掉两处开发话术提示（回放 / 节目单）；
         //        触屏在面板内左右滑可切层级；整体 UI 对齐到 24dp 网格并收窄第三列。
+        // v1.13：面板内长按下键改为"按住快速往下挑节目"（不再唤出播放控制）；
+        //        除设置页外所有弹层/面板加无操作自动隐藏（弹层 5 秒、选台面板 15 秒）；
+        //        换源列表去掉头像占位、只显示源名（在用源打「使用中」角标）；
+        //        三段式面板底边与右下信息框底边对齐、一级 90%/二级 70% 半透明、
+        //        信息框限高屏高 1/5；一二级菜单合并为一个无中间圆角的整体；
+        //        唤起左侧面板时先收起左下角临时信息块。
         // ⚠️ 与 App.kt 的 BuildConfigCompat 必须一致：
         //     versionCode ↔ VERSION_CODE（升级通道用它比大小）
         //     versionName ↔ VERSION_NAME
-        versionCode = 17
-        versionName = "1.12-legacy.17"
+        versionCode = 18
+        versionName = "1.13-legacy.18"
         vectorDrawables { useSupportLibrary = true }
         // minSdk < 21 时 core library desugaring 强制要求 multidex
         multiDexEnabled = true

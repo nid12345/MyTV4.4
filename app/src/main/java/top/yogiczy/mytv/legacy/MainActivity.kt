@@ -81,6 +81,7 @@ import top.yogiczy.mytv.legacy.ui.Density
 import top.yogiczy.mytv.legacy.ui.Palette
 import top.yogiczy.mytv.legacy.ui.UiKit
 import top.yogiczy.mytv.legacy.ui.quickop.QuickOpView
+import top.yogiczy.mytv.legacy.ui.system.ClampedLinearLayout
 import top.yogiczy.mytv.legacy.ui.system.ScreenAutoClose
 import top.yogiczy.mytv.legacy.ui.system.Snackbar
 import java.text.SimpleDateFormat
@@ -139,6 +140,32 @@ class MainActivity : AppCompatActivity() {
          * 对齐原版 `rememberDoubleBackPressedExitState(resetSeconds = 2)`。
          */
         private const val EXIT_CONFIRM_WINDOW_MS = 2_000L
+
+        /**
+         * v1.13 需求 2：**三段式选台面板**的无操作超时（毫秒）。
+         *
+         * 用户裁决原话：「包含面板，但用更长的超时」—— 弹层统一 5 秒（走
+         * `Prefs.uiScreenAutoCloseDelay`，默认 5 秒），面板单独给 15 秒。
+         *
+         * 为什么面板要更长：v1.11 用户曾明确要求"挑频道的时候别自己收掉"，
+         * 挑频道时盯着一列频道名看十几秒是常态；但完全不收又会让面板一直压在画面上。
+         * 15 秒是这两者之间的折中，且**任何按键 / 触摸都会重新计时**，
+         * 也就是说只有在真正"人不在"的时候才会自己收。
+         *
+         * ⚠️ 刻意**不**读 `Prefs.uiScreenAutoCloseDelay`：那个设置项的语义是"弹层超时"
+         * （默认 5 秒），若共用，把设置调到 30 秒会把面板一起拖长，
+         * 而用户要的是"面板与弹层**不同**的超时"。
+         */
+        private const val PANEL_AUTO_CLOSE_MS = 15_000L
+
+        /** v1.13 需求 5：面板整体的外圆角半径（dp）。列与列之间一律直角。 */
+        private const val COLUMN_RADIUS_DP = 10f
+
+        /** v1.13 需求 4：一级菜单背景不透明度（用户给的「90%」）。 */
+        private const val PANEL_L1_ALPHA = 0.90f
+
+        /** v1.13 需求 4：二级菜单（与三级）背景不透明度（用户给的「70%」）。 */
+        private const val PANEL_L2_ALPHA = 0.70f
     }
 
     private lateinit var player: PlayerController
@@ -245,22 +272,61 @@ class MainActivity : AppCompatActivity() {
      */
     private lateinit var quickOp: QuickOpView
 
-    // ⚠️ v1.11（用户需求 1）：**左侧选台面板不再有任何定时自动关闭**。
+    // ⚠️ v1.13（用户需求 2）：面板**又**有了定时自动关闭，但超时值与弹层**不同**。
     //
-    // 这里原本是 `private val panelAutoClose: ScreenAutoClose by lazy { … { hidePanel() } }`，
-    // 连同 `resetAutoHide()` 与它的 8 处调用点在本轮**整体删除**。原话：
-    //   「左侧菜单在挑选的时候就不要自动隐藏了，除了选定节目后再自动隐藏，
-    //     要么就等明确按返回或是点空白处才隐藏」
+    // 演变过程（两轮用户裁决叠在一起，注释留着免得下一轮又改回去）：
+    //   · v1.11 用户要求「左侧菜单在挑选的时候就不要自动隐藏了」→ 这一处曾被**整体删除**；
+    //   · v1.13 用户要求「除设置菜单外，所有在直播界面唤起的菜单和窗口都自动隐藏」，
+    //     我回问"这里的『所有』是否包含面板"（因为与 v1.11 直接冲突），
+    //     用户选择：**包含面板，但用更长的超时**。
     //
-    // 删除而不是「超时调大」的原因：面板的收起现在只剩三条**显式**路径 ——
-    //   ① 在面板里选中频道（selectChannel(..., fromPanel = true)）
-    //   ② 按返回键（onBackPressed）
-    //   ③ 点面板外的画面空白（onScreenTap → hitPanel 判定）
-    // 「挑频道」这个动作可能长时间没有任何按键/触摸（在读频道名、在等节目单），
-    // 任何定时器都会在这时把面板收掉、焦点也一并丢失，用户得重新从左边缘唤出 —— 正是被抱怨的体验。
-    //
-    // 设置项「超时自动关闭界面」**仍然生效**，它继续作用于快捷菜单 / 投屏 /
-    // 节目单来源 / 多线路选框 / 播放控制这五处（它们各有自己的 ScreenAutoClose 实例）。
+    // 于是现在的规则是：
+    //   · 三段式面板  → [PANEL_AUTO_CLOSE_MS] = **15 秒**（本字段）
+    //   · 其它弹层    → `Prefs.uiScreenAutoCloseDelay()` = **5 秒**（各自的 ScreenAutoClose）
+    //   · 设置页      → **不自动关闭**（用户明确豁免；正在改设置时被收掉会很糟）
+    // 全部都是「任何按键 / 触摸就重新计时」，见 [keepOverlaysAlive]。
+    private val panelAutoClose: ScreenAutoClose by lazy {
+        ScreenAutoClose(PANEL_AUTO_CLOSE_MS) { hidePanel() }
+    }
+
+    /**
+     * v1.13 需求 2：三处**此前完全没有自动关闭**的弹层补上超时。
+     *
+     * 排查过：快捷菜单 / 多线路 / 播放控制 / EPG 弹层都有各自的 `ScreenAutoClose`，
+     * 但这三个（投屏抽屉、节目单来源、分组管理）**一个都没有** —— 打开后不按返回键
+     * 就一直挂在屏上，正是用户说的"需要五秒后自动隐藏"。
+     */
+    private val dlnaCastAutoClose: ScreenAutoClose by lazy {
+        ScreenAutoClose(Prefs.uiScreenAutoCloseDelay(this)) { closeDlnaCast() }
+    }
+
+    private val epgSourceAutoClose: ScreenAutoClose by lazy {
+        ScreenAutoClose(Prefs.uiScreenAutoCloseDelay(this)) { closeEpgSourceManage() }
+    }
+
+    private val groupManageAutoClose: ScreenAutoClose by lazy {
+        ScreenAutoClose(Prefs.uiScreenAutoCloseDelay(this)) { closeGroupManage() }
+    }
+
+    /**
+     * v1.13 需求 2：任何**按键或触摸**都给在屏的菜单/窗口续期。
+     *
+     * 集中在一处而不是散在各个 View 里，理由：`dispatchKeyEvent` / `dispatchTouchEvent`
+     * 本来就是"事件进入视图树之前"的唯一喉舌（见它们各自的注释），
+     * 在这里续期能保证「不管焦点落在哪一行、用的是遥控器还是手指」都算数。
+     *
+     * ⚠️ 刻意**不含** 更新下载进度层 与 自绘对话框：
+     *   · 进度层是在下载中，收掉会让用户找不到「取消 / 安装」；而且它是从**设置页**进入的，
+     *     不属于"在直播界面唤起的菜单"。
+     *   · 对话框（添加源 / 删除确认）里有输入框，5 秒收掉会丢用户刚打的字。
+     */
+    private fun keepOverlaysAlive() {
+        if (!::panel.isInitialized) return
+        if (panel.visibility == View.VISIBLE) panelAutoClose.active()
+        if (dlnaView != null) dlnaCastAutoClose.active()
+        if (epgSourceView != null) epgSourceAutoClose.active()
+        if (groupManageView != null) groupManageAutoClose.active()
+    }
 
     /**
      * 临时频道界面是否可见（对齐原版 `MainContentState.isTempChannelScreenVisible`）。
@@ -296,6 +362,24 @@ class MainActivity : AppCompatActivity() {
         handler.postDelayed(tempInfoMaxShow, TEMP_INFO_MAX_SHOW_MS)
         refreshTopRight()
         refreshChannelInfoBlock()
+    }
+
+    /**
+     * v1.13 需求 6：收掉左下角的**临时频道信息块**，并取消它的两条计时。
+     *
+     * ⚠️ 只把 `tempInfoBar` 置 GONE 是不够的：`tempChannelVisible` 若仍是 true，
+     * 下一次 [refreshChannelInfoBlock]（换线路、台标异步回填、每秒 tick 都会调）
+     * 会立刻按"临时块该显示"把它又摆回来 —— 表现就是"关了又冒出来"。
+     * 所以这里连状态位与计时一起清。
+     */
+    private fun hideTempInfoBlock() {
+        tempChannelVisible = false
+        handler.removeCallbacks(tempChannelHide)
+        handler.removeCallbacks(tempInfoMaxShow)
+        if (::tempInfoBar.isInitialized) tempInfoBar.visibility = View.GONE
+        // 打日志：需求 6 的验收就是"日志里能证明先收了临时块、再出面板"，
+        // 而 1.5 秒的自动收起会掩盖问题（截图根本追不上），所以必须留痕。
+        UiLog.i("界面", "收掉左下临时信息块（面板唤起前）")
     }
 
     /**
@@ -658,12 +742,15 @@ class MainActivity : AppCompatActivity() {
     // onSettings   -> 打开快捷功能菜单
     // onLongLeft   -> 打开 EPG 弹层        （M7）
     // onLongRight  -> 打开多线路弹层       （M6/M7）
-    // onLongDown   -> 打开播放控制弹层     （M8/M9）
+    // onLongDown   -> 打开播放控制弹层     （M8/M9）⚠️ v1.12 起**仅面板收起时**，见下
     // onNumber     -> 数字选台（debounce 规则见 numberInput）
     // ```
     // 面板打开时**只留收起与菜单**，其余放行给焦点系统 —— 这样面板内的上下左右
     // 才能正常在列表间移动焦点（原版靠 Compose 的 `onPreviewKeyEvent` 只看不消费，
     // View 世界没有等价物，只能按"是否有回调"来区分，见 [Keys.dispatch] 的说明）。
+    //
+    // v1.13（用户需求 1）：面板打开时**长按下键不再是播放控制**，而是"按住快速往下挑频道"。
+    // 实现方式就是下面 [keysPanelExpanded] 里不绑 `onLongDown`（见那边的长注释）。
     //
     // 注意 v0.5 那个"右键展开面板"的写法**已删除**：原版右键是切换线路，不是展开面板。
 
@@ -690,7 +777,7 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    /** 面板打开时：只接管「左键收起」与菜单键；方向键一律放行给焦点导航。 */
+    /** 面板打开时：只接管「左右键进出层级」与菜单键；方向键一律放行给焦点导航。 */
     private val keysPanelExpanded: Keys.Handler by lazy {
         Keys.Handler(
             onLeft = { onPanelLeft() },
@@ -704,7 +791,19 @@ class MainActivity : AppCompatActivity() {
             // 短按 = 焦点项的 onClick（换台），长按 = 焦点项的长按（收藏），语义唯一。
             onLongLeft = { onLongLeftPlaceholder() },
             onLongRight = { onLongRightPlaceholder() },
-            onLongDown = { onLongDownPlaceholder() },
+            // ⚠️ v1.13 需求 1：这里**故意不绑 onLongDown**（原来绑的是"长按下键 → 播放控制弹层"）。
+            //
+            // 用户原话：「在左侧菜单唤起的时候，长按下键的时候不要唤起控制菜单，
+            //            左侧菜单唤起的时候长按下键目的是**快速往下挑选节目**」。
+            //
+            // 为什么"不绑"就等于"快速往下挑"：`Keys.dispatch` 的消费规则是
+            // 「**某个键只有在其对应回调非 null 时才被消费**」，其余一律 return false 放行。
+            // DPAD_DOWN 在这个 handler 里既没有短按回调（没绑 onDown）也没有长按回调（本行），
+            // 于是 DOWN 的**每一次重复事件**都原样进 View 树 —— 系统对方向键的原生行为就是
+            // 每个重复事件走一次焦点搜索，按住不放即连续下移，正是"快速往下挑选"。
+            //
+            // 对照：长按**上**键从来就没绑过，一直是这个行为 —— 这轮只是让"下"和"上"对称。
+            // 长按下键的"播放控制"入口仍然保留在**面板收起时**（keysPanelCollapsed）。
             onNumber = { n -> numberInput(n) },
         )
     }
@@ -975,12 +1074,17 @@ class MainActivity : AppCompatActivity() {
         showLinePicker()
     }
 
-    /** 原版 `onLongDown`：长按下键 → 播放控制弹层（v1.9 真正接通，用户需求 5）。 */
+    /**
+     * 原版 `onLongDown`：长按下键 → 播放控制弹层（v1.9 真正接通，用户需求 5）。
+     *
+     * ⚠️ v1.13 需求 1：**只在面板收起时**有效。
+     * 面板打开时 `keysPanelExpanded` 刻意不绑 `onLongDown` —— 那时长按下键的语义是
+     * "快速往下挑选节目"（见那边的注释），不是唤出控制菜单。
+     */
     private fun onLongDownPlaceholder() {
         Log.i(Keys.TAG, "长按下键 → 播放控制弹层")
         showPlayerControl()
     }
-
     // ---------------- 换台 / 切线路 / 数字选台 ----------------
 
     /** 在当前源的全部频道里前后移动（原版 `changeCurrentChannelToNext/Prev`，跨分组循环）。 */
@@ -1129,6 +1233,8 @@ class MainActivity : AppCompatActivity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         // 判据 1：EPG 弹层开着时任何按键都算"用户操作"，重新计时。
         if (::epgPanel.isInitialized && epgPanel.isOpen) epgAutoClose.active()
+        // v1.13 需求 2：任何按键都给在屏的菜单/窗口续期（面板 15 秒、弹层 5 秒）。
+        keepOverlaysAlive()
         return if (Keys.dispatch(event, currentKeyHandler())) true else super.dispatchKeyEvent(event)
     }
 
@@ -1168,15 +1274,21 @@ class MainActivity : AppCompatActivity() {
         // 而只要手指点一下屏幕，手势识别就会走到 `onScreenTap` 里读 `panel.visibility` →
         // `UninitializedPropertyAccessException`（真机堆栈：onScreenTap:936 ← onSingleTapUp:925 ← 这里）。
         // 视图树没建好就完全不走手势回调。
-        if (::panel.isInitialized) gestureDetector.onTouchEvent(ev)
+        if (::panel.isInitialized) {
+            // v1.13 需求 2：手指一碰屏幕就给出自动关闭"续期"（与按键同一条链路）。
+            if (ev.action == MotionEvent.ACTION_DOWN) keepOverlaysAlive()
+            gestureDetector.onTouchEvent(ev)
+        }
         return super.dispatchTouchEvent(ev)
     }
 
     // ---------------- 面板显隐 ----------------
-    // v1.11（用户需求 1）：面板的显隐规则**只剩两条**（原版第三条的"无操作超时自动隐藏"已删除）：
-    //   1) ClassicChannelScreenWrapper 的 onTap = onClose  → 点面板外空白隐藏
-    //   2) 面板内选中频道 / 按返回键                        → 显式隐藏
-    // 定时关闭为什么删掉：见上方 panelAutoClose 处的长注释。
+    // v1.11（用户需求 1）：面板的显式收起路径有三条：
+    //   1) 在面板里选中频道
+    //   2) 按返回键
+    //   3) 点面板外的画面空白（ClassicChannelScreenWrapper 的 onTap = onClose）
+    // v1.13（用户需求 2）：又加回了**定时收起**，但超时比弹层长（15 秒，见 panelAutoClose），
+    // 且任何按键/触摸都会重新计时。
 
     private var panelDismissing = false
 
@@ -1186,6 +1298,13 @@ class MainActivity : AppCompatActivity() {
         // 两者都要占屏幕左侧/左下，同时出现就是截图 IMG_9161 那种互相叠字。
         // 约定：**谁后开谁负责把对方关掉**。这里是面板后开 → 关掉快捷菜单。
         if (::quickOp.isInitialized && quickOp.isOpen) quickOp.close()
+        // v1.13 需求 6（用户）：**先隐藏底部信息框，再唤起左侧菜单**。
+        //
+        // 左下角那块"临时频道信息"（带台标、换台后出现）与面板右下角的信息框是**两套**东西：
+        // 临时块的存活由 `tempChannelVisible` 控制（最长 12 秒兜底），
+        // 面板信息框由"面板在屏"控制 —— 于是换台后马上唤出面板时**两块同时在屏**，
+        // 底部左右各一份频道信息互相压字（用户截图 Clipboard_Screenshot-3.png 就是这个）。
+        hideTempInfoBlock()
         panelDismissing = false
         // 问题 1：改可见性**之前**快照「上次光标在哪」，并屏蔽打开窗口期内的伪聚焦 ——
         // 否则系统自动聚焦分组栏第一项「换源」，中栏被换成订阅源列表、记忆也被冲掉。
@@ -1199,6 +1318,10 @@ class MainActivity : AppCompatActivity() {
         panel.alpha = 0f
         panel.animate().alpha(1f).setDuration(150L).start()
         refreshTopRight()
+        // v1.13 需求 2：面板的无操作超时（15 秒）。任何按键 / 触摸都会续期，
+        // 见 [keepOverlaysAlive]。
+        panelAutoClose.cancel()
+        panelAutoClose.active()
         // 诊断：面板"看不见"时靠这一行分辨是 alpha 没动画完、还是尺寸/位移不对。
         handler.postDelayed({
             UiLog.i("界面", "面板显隐 可见=${panel.visibility} alpha=${panel.alpha} " +
@@ -1208,6 +1331,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun hidePanel() {
+        // v1.13 需求 2：面板收起时**必须**取消计时，否则 15 秒后会对着一个已经收起的面板
+        // 再触发一次回调（hidePanel 自身有幂等保护，但会白刷日志、也会把
+        // "下次唤出"的计时起点搞乱）。
+        panelAutoClose.cancel()
         // 诊断：面板"刚唤出就消失"时必须能看出是谁触发的（调用栈前三帧）。
         runCatching {
             val st = Throwable().stackTrace.drop(1).take(3)
@@ -1986,17 +2113,18 @@ class MainActivity : AppCompatActivity() {
 
             // M6：列宽必须**实测**后回填，不能拿 s(112f) 之类的设计值硬算位移 ——
           // 一旦列宽随 Density 变化，硬编码就会让三态位移错位（原版用 onSizeChanged 同理）。
-          val navWrap = wrap(navColumn, s(140f)).apply { background = columnBg() }
+          //
+          // v1.13 需求 5：三列的背景**不再各自设置**，统一由 [syncColumnBackgrounds] 按
+          // "当前看得见的整体"给角 —— 只给整体最外侧的四角圆角，列与列相接处一律直角。
+          val navWrap = wrap(navColumn, s(140f))
           // ⚠️ 中栏**不能**再套 ScrollView：RecyclerView 自己管滚动，套两层会导致
           // 高度测量异常（表现为整列只显示一行）。直接按 panelMaxH 给高度。
           channelColumn.layoutParams = LinearLayout.LayoutParams(s(280f), panelMaxH)
-          channelColumn.background = columnBg()
           val chWrap = channelColumn
         // M7：第三列内部自己滚动（含 RecyclerView），不再套 ScrollView（同中栏的理由）
         val epgWrap = epgColumn
-        // 判据 2A：第三列此前**完全没有背景**（只给了 layoutParams），于是节目表悬在画面上
-        // 没有面板底。原版第三列是独立的深色半透明面板底，这里与中栏用同一套 columnBg。
-        epgColumn.background = columnBg()
+        // 判据 2A：第三列此前**完全没有背景**，于是节目表悬在画面上没有面板底。
+        // v1.13 需求 5 起它跟另两列共用同一套"整体圆角"逻辑，见 syncColumnBackgrounds。
         // 判据 1（用户）：初始 state=0（未展开）→ 第三列不显示（含竖提示）
         epgColumn.visibility = View.GONE
           // ⚠️ 宽度要按「节目列表 + 日期列」的**实际内容**给。
@@ -2016,10 +2144,14 @@ class MainActivity : AppCompatActivity() {
                 epgColumn.setFocused(st == 2)
                 // v1.12 需求 2：宽度随聚焦/跨天状态重算（必须在位移之前算好，避免动画中布局跳动）
                 syncEpgColumnWidth()
+                // v1.13 需求 5：圆角随"看得见的是哪几列"重算
+                syncColumnBackgrounds(st)
                 // 判据 1（用户）：节目表**没点开时不要显示**第三列（连"向右查看节目单"竖提示一起），
                 // 面板只占"分组栏 + 中栏"两列宽；点开（state ≥ 1）才出现。
                 epgColumn.visibility = if (st == 0) View.GONE else View.VISIBLE
             }
+          // 初始（state 0）就把圆角摆好，否则首帧是"三个直角块"、下一次状态变化才跳成圆角
+          syncColumnBackgrounds(0)
 
           panel.addView(navWrap)
           panel.addView(chWrap)
@@ -2067,27 +2199,71 @@ class MainActivity : AppCompatActivity() {
       }
 
     /**
-     * 三列共用的面板底。
+     * 三列共用的面板底（v1.13 需求 4 / 5 重写）。
      *
-     * v1.12 需求 2（整体视觉对齐）：原来左列圆角 10f、其余 8f —— 三个圆角**不一致**，
-     * 排在一起时左列的角会明显更钝。现在统一 10dp（浮层统一圆角）。
-     * 透明度也统一 0.94：直播画面在面板下面透出来是正常的（原版也是半透明），
-     * 但三列**必须一致**，否则相邻两列之间会出现一条可见的色阶。
+     * 与前一版的两处关键差别：
+     *  · **列与列相接的角一律直角**（传 0），只有整体最外侧的四角是 [COLUMN_RADIUS_DP]。
+     *    以前每列各带一套 10dp 圆角，三列拼起来就是"两个框框贴在一起、中间两段圆弧"
+     *    —— 正是用户截图圈出来的那个问题。
+     *  · **不透明度按层级给**：一级菜单 90%、二级与三级 70%（用户给定值，见
+     *    [PANEL_L1_ALPHA] / [PANEL_L2_ALPHA]）。三列不再强行统一，因为用户要的就是"一级更实、
+     *    二级更透"。代价是两列交界处会有一条可见的色阶 —— 这是需求本身要的效果，不是缺陷。
      */
-    private fun columnBg() = UiKit.rounded(
-        UiKit.withAlpha(Palette.surface(this@MainActivity), 0.94f), 10f, this)
+    private fun columnBg(alpha: Float, tlDp: Float, trDp: Float, brDp: Float, blDp: Float) =
+        UiKit.roundedCorners(
+            UiKit.withAlpha(Palette.surface(this@MainActivity), alpha),
+            tlDp, trDp, brDp, blDp, this,
+        )
 
     /**
-     * 面板最大高度（三列共用）。
+     * v1.13 需求 5：按**当前看得见的是哪几列**，把三列拼成一个只有外圈带圆角的整体。
      *
-     * 问题 1「菜单整体做大」：原版 1.7 的三段式是**近乎满屏**的
-     * （`Box(fillMaxSize).padding(24.dp)` 里的 `fillMaxHeight()`），
-     * 本工程此前只给了 0.66，显得矮了一截。这里提到 0.80 —— 留出面板自身的
-     * 24dp 外边距（见 [panelEdgeDp]）与下方空间（真机上 `displayMetrics.heightPixels`
-     * 含被隐藏的导航栏，取太大面板底部会被切掉）。
+     * 三种状态看得见的内容不同（PanelHost 的位移把左边的列推到了屏幕外）：
+     *
+     * | 状态 | 位移 | 屏幕上看得见 | 外圆角该落在谁身上 |
+     * |---|---|---|---|
+     * | 0 | 0 | 分组栏 + 频道列 | 分组栏左两角、频道列右两角 |
+     * | 1 | -分组栏宽 | 频道列 + 节目单列 | 频道列左两角、节目单列右两角 |
+     * | 2 | -(分组栏+频道列)宽 | 节目单列 | 节目单列四个角 |
+     *
+     * 由此推出：分组栏**永远是整体最左**（它只在状态 0 与频道列相接）→ 恒为"左圆右直"；
+     * 节目单列只在状态 2 独占时四角都圆；频道列夹在中间，随状态在两种形态间切。
+     */
+    private fun syncColumnBackgrounds(state: Int) {
+        val r = COLUMN_RADIUS_DP
+        navWrapRef?.background =
+            columnBg(PANEL_L1_ALPHA, tlDp = r, trDp = 0f, brDp = 0f, blDp = r)
+        channelColumn.background = if (state <= 0) {
+            // 状态 0：左边贴着分组栏 → 左直角；右边就是整体外缘 → 右圆角
+            columnBg(PANEL_L2_ALPHA, tlDp = 0f, trDp = r, brDp = r, blDp = 0f)
+        } else {
+            // 状态 ≥1：分组栏已移出屏幕，频道列成了整体最左 → 左圆角；右侧接节目单列 → 右直角
+            columnBg(PANEL_L2_ALPHA, tlDp = r, trDp = 0f, brDp = 0f, blDp = r)
+        }
+        epgColumn.background = if (state >= 2) {
+            // 状态 2：节目单列独占整块 → 四角都圆
+            columnBg(PANEL_L2_ALPHA, tlDp = r, trDp = r, brDp = r, blDp = r)
+        } else {
+            // 状态 1：左侧接频道列 → 左直角
+            columnBg(PANEL_L2_ALPHA, tlDp = 0f, trDp = r, brDp = r, blDp = 0f)
+        }
+    }
+
+    /**
+     * 面板高度（三列共用）。
+     *
+     * v1.13 需求 4（用户）：**面板底边要与右下角信息框的底边对齐**。
+     *
+     * 对齐怎么来的：右下角信息框（[buildBottomBar] 的外层）是 `Gravity.BOTTOM` + `bottomMargin = 24dp`，
+     * 它的底边落在 `屏高 - 24dp`；面板这里 `topMargin = 24dp`，所以只要高度取
+     * 「屏高 - 上下各 24dp」，两条底边就正好落在同一条水平线上。
+     *
+     * 历史沿革（别改回去）：更早是 0.66 屏高（显得矮），M10 因「菜单整体做大」提到 0.80，
+     * 但 0.80 与 24dp 网格无关 —— 面板底边落在一个"看哪儿都不对齐"的位置上。
+     * 现在改成与网格一致的算式，既更高（大屏上约 0.95 屏高）又有明确的对齐靶子。
      */
     private val panelMaxH: Int by lazy {
-        (resources.displayMetrics.heightPixels * 0.80f).toInt()
+        resources.displayMetrics.heightPixels - 2 * s(panelEdgeDp)
     }
 
     /**
@@ -2174,14 +2350,22 @@ class MainActivity : AppCompatActivity() {
      * 之前这里既没有底色（所以字直接糊在画面上），尺寸也只有原版的一半左右。
      */
     private fun buildBottomBar(): View {
-        val card = LinearLayout(this).apply {
+        // v1.13 需求 4（用户）：**高度不能超过屏高的五分之一**。
+        //
+        // `LinearLayout` 没有 maxHeight，`ConstraintLayout` 又在本项目的冻结决策里被禁，
+        // 所以用 [ClampedLinearLayout] 在测量阶段把高度夹住（见那个类的注释）。
+        // 正常内容本来就到不了上限（见下面把字号调小后的高度估算），
+        // 这条只是"内容异常长时兜住"的保险，避免信息框一路顶到屏幕上半部分。
+        val card = ClampedLinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.END
-            // 底色：与三段式面板同源的深色（见 columnBg），0.8 透明度（原版 surface.copy(0.8f)）
+            maxHeightPx = resources.displayMetrics.heightPixels / 5
+            // v1.13 需求 4：底色与三段式面板同源（见 columnBg），
+            // 不透明度按用户给定值改为 **0.70**（原来是 0.8）。
             background = UiKit.rounded(
-                UiKit.withAlpha(Palette.surface(this@MainActivity), 0.8f), 10f, this@MainActivity
+                UiKit.withAlpha(Palette.surface(this@MainActivity), PANEL_L2_ALPHA), 10f, this@MainActivity
             )
-            setPadding(s(20f), s(10f), s(20f), s(10f))
+            setPadding(s(20f), s(8f), s(20f), s(8f))
         }
 
         // ---- 第一行：频道名 + 角标（**不带台标**）----
@@ -2197,6 +2381,12 @@ class MainActivity : AppCompatActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)   // 1.7 用 headlineMedium
             typeface = Typeface.DEFAULT_BOLD
             text = "—"
+            // ⚠️ v1.13 需求 4：频道名占满"角标之外"的剩余宽度（见下面 addView 的 weight=1），
+            // 必须自己管住单行，否则长频道名会把整行撑爆、连累角标被压成一列。
+            // 文本右对齐：视觉上仍与角标贴在一起（与改动前一致），长了就在尾部出省略号。
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
         }
         bottomTags = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -2212,10 +2402,16 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { marginStart = s(8f) })
         }
-        head.addView(bottomTitle)
+        // ⚠️ v1.13 需求 4：这一行**必须**给成定宽 + 频道名 weight=1。
+        // 原来是「整行 WRAP_CONTENT、频道名与角标都 WRAP_CONTENT」：内容一旦超过卡片宽度，
+        // 横向 LinearLayout 就会把最后一个角标按剩余宽度（可能是 10px 级）去测量，
+        // 于是 "0KB/s" 被逐字换行、竖着排成一条窄柱（实测复现，见 UiKit.tag 的注释）。
+        // 现在：标题吃掉剩余宽度并自己省略号，角标永远保持自然宽度。
+        head.addView(bottomTitle, LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         head.addView(bottomTags)
         card.addView(head, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { gravity = Gravity.END })
 
         // ---- 节目信息区（当前节目行 + 下一节目行）----
@@ -2227,9 +2423,15 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
         }
-        bottomCurTime = bottomInfoText(15f, Palette.onSurfaceVariant(this))
-        bottomCurRemain = bottomInfoText(15f, Palette.onSurfaceVariant(this))
-        bottomCurTitle = bottomInfoText(15f, Palette.onSurface(this))
+        // v1.13 需求 4（用户）：**只有频道名保持大号**（上面那行 22sp 的 bold），
+        // 其余内容（时间段 / 剩余 / 节目名 / 状态）字号从 15sp 收到 13sp，
+        // 这样信息框整体高度明显低于屏高 1/5 的上限，不会贴着上限走。
+        bottomCurTime = bottomInfoText(13f, Palette.onSurfaceVariant(this))
+        bottomCurRemain = bottomInfoText(13f, Palette.onSurfaceVariant(this))
+        // v1.13 需求 4：节目名右对齐 + 占满剩余宽度（见下面的 weight=1），
+        // 长节目名的收敛方式是**尾部省略号**，不再挤压同行其它文字。
+        bottomCurTitle = bottomInfoText(13f, Palette.onSurface(this))
+            .apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
         bottomFill = View(this)
         bottomRest = View(this)
         bottomProgressTrack = LinearLayout(this).apply {
@@ -2239,31 +2441,35 @@ class MainActivity : AppCompatActivity() {
             visibility = View.INVISIBLE
         }
         curRow.addView(bottomCurTime, lpWrap().apply { marginEnd = s(10f) })
-        curRow.addView(bottomProgressTrack, LinearLayout.LayoutParams(s(150f), s(6f)).apply { marginEnd = s(10f) })
+        curRow.addView(bottomProgressTrack, LinearLayout.LayoutParams(s(130f), s(6f)).apply { marginEnd = s(10f) })
         curRow.addView(bottomCurRemain, lpWrap().apply { marginEnd = s(10f) })
-        curRow.addView(bottomCurTitle, lpWrap())
+        // v1.13 需求 4：节目名吃剩余宽度（原来也是 WRAP_CONTENT，节目名一长就把自己挤成一条竖柱）
+        curRow.addView(bottomCurTitle, LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         bottomProgBlock.addView(curRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { gravity = Gravity.END; topMargin = s(6f) })
 
         val nextRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL or Gravity.END
         }
-        bottomNextTime = bottomInfoText(15f, Palette.onSurfaceVariant(this))
-        bottomNextTitle = bottomInfoText(15f, Palette.onSurface(this))
+        bottomNextTime = bottomInfoText(13f, Palette.onSurfaceVariant(this))
+        bottomNextTitle = bottomInfoText(13f, Palette.onSurface(this))
+            .apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
         nextRow.addView(bottomNextTime, lpWrap().apply { marginEnd = s(10f) })
-        nextRow.addView(bottomNextTitle, lpWrap())
+        nextRow.addView(bottomNextTitle, LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         bottomProgBlock.addView(nextRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { gravity = Gravity.END; topMargin = s(2f) })
 
         card.addView(bottomProgBlock, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { gravity = Gravity.END; topMargin = s(5f) })
 
         // ---- 状态行（载入中 / 解析为空 / 播放失败…）----
-        bottomStatusText = bottomInfoText(15f, Palette.onSurfaceVariant(this))
+        bottomStatusText = bottomInfoText(13f, Palette.onSurfaceVariant(this))
         bottomStatusText.visibility = View.GONE
         card.addView(bottomStatusText, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -2871,9 +3077,14 @@ class MainActivity : AppCompatActivity() {
         }
         rootView.addView(view, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        // v1.13 需求 2：这个抽屉此前**完全没有超时**（打开就挂着），现在按设置项（默认 5 秒）自动关。
+        epgSourceAutoClose.cancel()
+        epgSourceAutoClose.active()
     }
 
     private fun closeEpgSourceManage() {
+        // v1.13 需求 2：先停计时（下面有 early return，放后面会漏）。
+        epgSourceAutoClose.cancel()
         val v = epgSourceView ?: return
         (v.parent as? ViewGroup)?.removeView(v)
         epgSourceView = null
@@ -3365,9 +3576,13 @@ class MainActivity : AppCompatActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         view.bringToFront()
         view.post { view.requestFocus() }
+        // v1.13 需求 2：分组管理此前也没有超时，补上。
+        groupManageAutoClose.cancel()
+        groupManageAutoClose.active()
     }
 
     private fun closeGroupManage() {
+        groupManageAutoClose.cancel()
         val v = groupManageView ?: return
         (v.parent as? ViewGroup)?.removeView(v)
         groupManageView = null
@@ -3444,10 +3659,16 @@ class MainActivity : AppCompatActivity() {
         view.post { runCatching { view.focusFirst() } }
         // 打开即搜索（原版 `LaunchedEffect { DlnaCastRepository.scan(context) }`）
         DlnaCastRepository.scan(this)
+        // v1.13 需求 2：投屏抽屉此前也没有超时，补上。
+        // ⚠️ 只收抽屉，**不影响正在进行的投送** —— `closeDlnaCast()` 只做 removeView
+        // 与清回调，`DlnaCastRepository` 的推送链路不受影响。
+        dlnaCastAutoClose.cancel()
+        dlnaCastAutoClose.active()
         UiLog.i("投屏", "投屏抽屉已打开")
     }
 
     private fun closeDlnaCast() {
+        dlnaCastAutoClose.cancel()
         val v = dlnaView ?: return
         (v.parent as? ViewGroup)?.removeView(v)
         dlnaView = null

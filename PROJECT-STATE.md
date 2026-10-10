@@ -12,7 +12,8 @@
 - 技术栈：原生 View + ExoPlayer 2.18.1 + okhttp 3.12.13 + appcompat 1.4.2 + core-ktx 1.8.0 + recyclerview 1.2.1
 - 禁止引入：Compose / media3 / kotlinx.serialization / constraintlayout / leanback
 - EPG 形态：竖排列表 + 日期列，不做时间轴
-- 快捷功能菜单：7 项固定顺序，无图标，15 秒自动关闭
+- 快捷功能菜单：7 项固定顺序，无图标，超时自动关闭（**取设置项 `UI_SCREEN_AUTO_CLOSE_DELAY`，默认 5 秒**）
+  —— v1.13 用户明确要求「除设置菜单外所有弹层/窗口 5 秒自动隐藏」，原「写死 15 秒」作废
 - 设置页：13 分类，54 配置键
 - EPG 日志文案逐字沿用原版：`解析节目单完成，共N个频道，M个节目`
 - 焦点引擎：按内容键（不是下标）记忆与恢复，恢复链整体 `runCatching` 兜底
@@ -24,13 +25,13 @@
 ## 当前进度
 
 - 已完成：**M0 / M1 / M2 / M3（含三项补测） / M4 / M5 / M6 / M7 / M8 / M9 / M10 / M13 / M14**
-- 已交付版本：**v1.0 → v1.12**（`versionCode 6 → 17`），全部已发 GitHub Release（tag `v1.8` / `v1.10` / `v1.11` / `v1.12`）
+- 已交付版本：**v1.0 → v1.13**（`versionCode 6 → 18`），全部已发 GitHub Release（tag `v1.8` / `v1.10` / `v1.11` / `v1.12` / `v1.13`）
 - 进行中：**无**
-- **最新产物**：`dist/MyTV4.4-v1.12-legacy17.apk`（release 10,334,270 B）/ `dist/MyTV4.4-v1.12-legacy17-debug.apk`
+- **最新产物**：`dist/MyTV4.4-v1.13-legacy18.apk`（release）/ `dist/MyTV4.4-v1.13-legacy18-debug.apk`
 - **签名**：`keystore/mytv-release.jks`（alias=mytv，需备份）；
   SHA-256 `02e143e8102283c2a3d26c505ea5fa44962ff84115eb598cbed467c97236f7c2`（v1.7 起未换钥）
 - **阻塞**：无
-- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.12 = `versionCode 17`）
+- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.13 = `versionCode 18`）
 - 下一个强制汇报检查点：**下一轮用户需求到来时**
 
 ## 📌 已知偏差（记入不追究）
@@ -1946,3 +1947,176 @@ runCatching {
   `application-label:'MyTV4.4'`、SHA-256 `02e143e8102283c2a3d26c505ea5fa44962ff84115eb598cbed467c97236f7c2`；
   debug 包名 `top.yogiczy.mytv.legacy.debug` 独立签名
 - 多 dex 确认：release = `classes.dex 8,377,144B` + `classes2.dex 589,304B` + `classes3.dex 2,624,064B`
+
+---
+
+# v1.13（versionCode 18 / `1.13-legacy.18`）
+
+用户一次性给了 6 条需求（附 4 张截图）。**全部为纯 UI/交互调整，无新依赖、无数据层改动。**
+
+## 需求与实现（逐条）
+
+### 需求 1 —— 面板内长按下键改为"按住快速往下挑节目"
+
+用户原话：「在左侧菜单唤起的时候，长按下键的时候不要唤起控制菜单，左侧菜单唤起的时候长按下键
+目的是快速往下挑选节目」。
+
+**根因**：`keysPanelExpanded` 绑了 `onLongDown = { onLongDownPlaceholder() }`（长按下键 → 播放控制弹层）。
+**修法**：从 `keysPanelExpanded` 里**删掉这一行**，别的一字不改。
+
+为什么"不绑"就等于"按住快速下移"：`Keys.dispatch` 的消费规则是
+**「某个键只有在其对应回调非 null 时才被消费」**，其余一律 `return false` 放行到 View 树。
+`DPAD_DOWN` 在这个 handler 里既没有 `onDown` 也没有 `onLongDown` → DOWN 的**每一次重复事件**
+都原样进 View 树，系统对方向键的原生行为就是"每个重复事件走一次焦点搜索"，按住不放即连续下移。
+长按**上**键从来就没绑过、一直是这个行为，这轮只是让"下"和"上"对称。
+播放控制入口保留在**面板收起时**（`keysPanelCollapsed` 未改）。
+
+**实测**：面板展开 → RIGHT 进频道列 → 日志出现「一级菜单选中框透明度 → 50%（焦点在二级）」；
+`input keyevent --longpress 20` 后日志中**没有**「长按下键 → 播放控制弹层」。
+
+### 需求 2 —— 除设置页外，所有弹层/窗口无操作自动隐藏
+
+用户原话：「除了总的设置菜单外，其他所有在直播界面唤起的菜单和窗口，都需要在没有任何按键
+或是触碰指令的情况下，五秒后自动隐藏」。
+
+**与 v1.11 的冲突**：v1.11 用户要求「左侧菜单在挑选的时候不要自动隐藏」，这条被整体删除过。
+v1.13 的"所有"字面上包含面板 → **回问后用户裁决：包含面板，但用更长的超时**。
+
+于是就三条规则（`MainActivity`）：
+- 三段式面板 → `PANEL_AUTO_CLOSE_MS = 15_000L`（硬编码常量，**故意不接设置项**，因为用户要的是"面板与弹层不同超时"）
+- 其它弹层 → `Prefs.uiScreenAutoCloseDelay()`（默认 **5 秒**）
+- 设置页 → **不自动关闭**（用户明确豁免）
+
+**审计结果**：快捷菜单 / 多线路 / 播放控制 / EPG 弹层**本来就有**各自的 `ScreenAutoClose`；
+**投屏抽屉、节目单来源、分组管理这三处一个都没有** —— 正是用户说的"需要五秒后自动隐藏"。
+新增 `dlnaCastAutoClose` / `epgSourceAutoClose` / `groupManageAutoClose` 三个实例（5 秒）。
+
+**续期链路**：新增 `keepOverlaysAlive()`，在 `dispatchKeyEvent`（按键）与
+`dispatchTouchEvent` 的 `ACTION_DOWN`（触摸）里各调一次 —— 集中在一处而不是散在各 View，
+能保证"不管焦点落在哪一行、用遥控器还是手指"都算数。
+**刻意不含** 更新下载进度层（下载中收掉会让用户找不到"取消/安装"，且它是从设置页进入的）
+与自绘对话框（有输入框，5 秒收掉会丢用户刚打的字）。
+
+**实测**：面板 t=8s 可见 / t=18s 已收（证明是 15 秒档，不是默认 5 秒）；
+投屏抽屉 t=3s 可见 / t=8s 已收（设置先被改成 10 秒时 t=8s 仍在，改回 5000ms 后按 5 秒收，
+说明**确实走设置项**）；设置页 t=3s 与 t=17s 截图完全一致（avg 亮度 14.9 对 14.9）→ 不自动关闭。
+
+### 需求 3 —— 换源入口去掉头像位
+
+用户原话：「针对换源这个入口跟原版一样不要留头像的位置，直接间接的显示直播源名字就好，网址也不用显示」。
+
+`PanelRowView.iconView` 原来是 `INVISIBLE` 占位（40dp + 10dp marginEnd）→ 源名被无谓右推 **50dp**。
+`ChannelColumnView.Row.TextRow` 新增 `noIcon: Boolean = false` 与 `trailing: String? = null`；
+`SourcePanelView.rows()` 改为 `subtitle = null`（不再显示网址）、`icon = null`、`noIcon = true`，
+在用源用**行尾「使用中」角标**标识（原版就是用角标而不是副标题）。
+`noIcon = true` 时**同时**把 `marginEnd` 归零 —— 只设 GONE 在部分 ROM 上 margin 仍被计入。
+
+### 需求 4 —— 底边对齐 + 透明度 + 信息框限高
+
+- **底边对齐**：信息框外层是 `Gravity.BOTTOM + bottomMargin 24dp` → 底边落在 `屏高 − 24dp`；
+  面板 `topMargin = 24dp`，于是把 `panelMaxH` 从 `heightPixels * 0.80f` 改成
+  `heightPixels - 2 * s(panelEdgeDp)`，两条底边就落在同一条水平线上。
+- **透明度**：`PANEL_L1_ALPHA = 0.90f`（一级菜单）、`PANEL_L2_ALPHA = 0.70f`（二级/三级 + 右下信息框，原 0.8）。
+  `columnBg()` 从"每列一套固定值"改为 `columnBg(alpha, tl, tr, br, bl)`。
+- **信息框限高 1/5**：`LinearLayout` 没有 maxHeight、本工程又禁 `ConstraintLayout`，
+  所以新增 `ui/system/ClampedLinearLayout.kt`，在 `onMeasure` 里把 `measuredHeight` 夹到 `maxHeightPx`。
+  同时把信息文字 15sp → **13sp**、进度条 150 → **130dp**，让正常内容本来就到不了上限。
+- **长内容不挤压同行**（见"新踩到的坑"第 2 条）：频道名改为 `weight = 1f` + `maxLines = 1` +
+  `ellipsize = END`，节目信息两行的标题同样给 `weight = 1f`。
+
+### 需求 5 —— 一二级菜单合并为一个无中间圆角的整体
+
+新增 `UiKit.roundedCorners(fill, tl, tr, br, bl, ctx)`（`GradientDrawable.cornerRadii` 的顺序是
+`[TL,TL,TR,TR,BR,BR,BL,BL]`，封装掉这个容易记错的顺序）。
+`columnBg(alpha, tl, tr, br, bl)` + `syncColumnBackgrounds(state)` 按"当前看得见的是哪几列"给角：
+
+| 状态 | 位移 | 屏幕上看得见 | 圆角落点 |
+|---|---|---|---|
+| 0 | 0 | 分组栏 + 频道列 | 分组栏左两角、频道列右两角 |
+| 1 | -分组栏宽 | 频道列 + 节目单列 | 频道列左两角、节目单列右两角 |
+| 2 | -(分组栏+频道列)宽 | 节目单列 | 节目单列四个角 |
+
+`panel.onStateChanged` 里调 `syncColumnBackgrounds(st)`，`buildPanel()` 末尾再补一次
+`syncColumnBackgrounds(0)`（否则首帧是"三个直角块"，下一次状态变化才跳成圆角）。
+
+**实测（1280×720 截图坐标系）**：
+- 状态 0：y=32 顶边 42..584 且**内部无暗缝**，到 y=42 才展开到 32..591（两端圆角）→ 接缝处没有圆角
+- 状态 2：顶边 y=32 → 12..457，y=44 → 0..468；底边 y=678 → 1..467，y=686 → 8..461
+  → **四个角都是圆的**
+- 状态 1：y=686 底边 8..738 **连续**（只在 643 处被信息框圆角切了 1px），接缝 x≈374 无凹口
+
+### 需求 6 —— 打开面板时先收起底部信息框
+
+用户原话：「当点开底部信息框的时候同步点出右侧菜单时候，两个会同时显示，优化下，
+当点开底部信息框时候同步点右侧菜单时候，先隐藏底部信息框再唤起左侧菜单款」。
+
+新增 `hideTempInfoBlock()`，`showPanel()` 里在 `panel.visibility = VISIBLE` **之前**调用。
+⚠️ 只把 `tempInfoBar` 置 GONE 不够：`tempChannelVisible` 若仍是 true，下一次
+`refreshChannelInfoBlock()`（换线路 / 台标异步回填 / 每秒 tick 都会调）会立刻把它摆回来，
+表现就是"关了又冒出来"，所以这里**连状态位与两条计时一起清**。
+
+**实测日志顺序**（`input keyevent 20` 换台后立刻 `23` 开面板）：
+```
+左下信息块：频道=陈三五娘（百花潮剧院） … 显示=true
+收掉左下临时信息块（面板唤起前）
+面板唤出 → 光标回到分组栏第 3 项
+面板显隐 可见=0 alpha=1.0 尺寸=840x984 位移=0.0 状态=0
+```
+截图里只有面板 + 右下信息框，左下角干净。
+
+## 验收实测数据（模拟器 AVD `mytv19`，API 19）
+
+| 项 | 期望 | 实测 |
+|---|---|---|
+| 面板底边 | 与信息框底边同线 | 都是截图 y=**687** |
+| 面板尺寸 | `屏高 − 48dp` | 840×984 app px（= 560×656 截图 px） |
+| 一级菜单底色 | 90% × `#0E0E0E` | `(13,13,13)` = 0.9 × 14 ✓ |
+| 二级菜单底色 | 70% × `#0E0E0E` | `(10,10,10)` = 0.7 × 14 ✓ |
+| 右下信息框底色 | 70% | `(10,10,10)` ✓ |
+| 信息框高度 | ≤ 屏高 1/5（=144 截图 px） | 状态行时 **102 px**；三行节目数据时 **140 px** ✓ |
+| 面板超时 | 15 秒 | t=8s 在、t=18s 收 ✓ |
+| 弹层超时 | 取设置项（默认 5 秒） | t=3s 在、t=8s 收 ✓ |
+| 设置页 | 不自动关闭 | t=3s 与 t=17s 截图一致 ✓ |
+| 版本号 | 18 / `1.13-legacy.18` | `aapt2 dump badging` 与设置页「应用版本」均一致 ✓ |
+
+> 换算关系（沿用 v1.12 结论，本轮再次验证）：`逻辑分辨率 = 1920×1080`（`wm size` override），
+> `screencap` 输出的是**物理帧缓冲 1280×720** → `截图 px = dp × 1.3333`，`截图 px = 逻辑 px ÷ 1.5`。
+
+## 本轮新踩到的坑
+
+1. **`/** … */` 注释被提前闭合会让整个文件"Expecting member declaration"连环报错**。
+   给 `SourcePanelView.rows()` 追加说明时把原注释的 `*/` 留在了中间，编译器在 22~28 行连报 40+ 条。
+   症状吓人（像语法全崩），实际只是注释块少写了一个开头。
+2. **横向 `LinearLayout` 会把最后一个 `WRAP_CONTENT` 子 View 按"剩余宽度"去测量**。
+   信息框第一行（频道名 22sp + 4 个角标）超宽时，排最后的 `0KB/s` 角标拿到几像素的
+   AT_MOST 规格 → TextView **一个字一行竖排成一条窄柱**（截图右端那串"竖排乱码"就是这个），
+   而且内容比 1/5 上限还高、最后一行字被裁掉。
+   修法：整行给成定宽、频道名 `weight=1f` + `maxLines=1` + `ellipsize=END`，
+   并在 `UiKit.tag()` 里给所有角标补上 `maxLines=1`（角标宁可省略号也绝不能换行成柱）。
+3. **debug APK 会出现 4 MB 级的对齐空洞**（v1.13 首次遇到）：
+   17,224,596 B 里有 4,217,506 B 的空隙，位置在 `META-INF/MANIFEST.MF` 之后、
+   `lib/arm64-v8a/libconscrypt_jni.so` 之前（对齐到了 0x400000 而不是 4096）。
+   **release 包完全正常**（最大条目间隙 3 字节）。
+   处理：`zipalign -p -f 4` + `apksigner sign --ks ~/.android/debug.keystore …` 重新对齐重签，
+   17,224,596 B → **12,905,955 B**，安装运行正常。
+4. **`input tap` 用的是逻辑分辨率（1920×1080），而 `screencap` 是物理帧缓冲（1280×720）**
+   —— 从截图量出来的坐标必须 **×1.5** 才能喂给 `input tap`；直接拿截图坐标点会点空。
+   截图→dp 仍是 ×1.3333，两个换算不要混。
+5. 快捷菜单的按钮**点一次只移焦点、点两次才激活**。
+6. **没有节目单就没法验证第三列**：模拟器访问不到任何公网 EPG 源。
+   用本地 `python3 -m http.server 8899 --bind 127.0.0.1` + 模拟器的 `10.0.2.2` 映射，
+   再 `adb shell run-as <pkg> cp` 直接改写 `shared_prefs/legacy_prefs.xml` 里的
+   `EPG_SOURCE_CURRENT`（先 `am force-stop`）→ 拿到 7 频道 / 126 节目的可控数据。
+   **这招可复用**：凡是"要特定数据才能进到的界面态"，都可以绕开 UI 直接改 prefs。
+
+## 产物（v1.13，versionCode 18）
+
+- `dist/MyTV4.4-v1.13-legacy18.apk`（release **10,337,641 B**，MD5 `20d26eddb9be9b1d4c10cb0140546d5a`，已签名）
+- `dist/MyTV4.4-v1.13-legacy18-debug.apk`（debug **12,905,955 B**，MD5 `2f0d8cc17cfb90616aeb6c589d089903`，
+  经 zipalign 重对齐 + debug 密钥重签）
+- `update/version.json` → v1.13 清单
+- `bash ./gradlew :app:assembleRelease :app:assembleDebug --offline` → `BUILD SUCCESSFUL in 4m 49s`，
+  83 tasks，`lintVitalRelease` 通过
+- 签名核对：release `versionCode='18' versionName='1.13-legacy.18'`、`minSdkVersion:'19'`、
+  `targetSdkVersion:'28'`、SHA-256 `02e143e8102283c2a3d26c505ea5fa44962ff84115eb598cbed467c97236f7c2`；
+  debug 包名 `top.yogiczy.mytv.legacy.debug`（Android Debug 密钥独立签名）

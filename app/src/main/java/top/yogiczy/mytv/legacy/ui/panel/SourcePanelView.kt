@@ -15,7 +15,19 @@ import top.yogiczy.mytv.legacy.data.IptvSource
  */
 class SourcePanelView(private val ctx: Context) {
 
-    /** 源列表 → 行模型（原 `renderSourcePanel` 的 rows 构造）。 */
+    /**
+     * 源列表 → 行模型（原 `renderSourcePanel` 的 rows 构造）。
+     *
+     * v1.13 需求 3（用户）：**跟原版一样，不留头像的位置；直接显示直播源名字，网址不显示**。
+     *
+     * 改动前每行是「源名 + 网址」，且行首留着一个 40dp 的图标位（`PanelRowView.iconView`
+     * 用 INVISIBLE 占位，还带 10dp 右边距）—— 于是源名被无谓地往右推了 50dp，
+     * 用户截图里那块空白就是它。
+     *
+     * 现在：`noIcon = true` 把图标位**整个去掉**；副标题不再放网址；
+     * 当前在用的源改用行尾「使用中」角标标识（原版就是用角标而不是副标题）。
+     * 网址仍然可用 —— 长按行删除源时的确认弹窗里会带出来，不占列表版面。
+     */
     fun rows(
         sources: List<IptvSource>,
         currentUrl: String,
@@ -28,16 +40,20 @@ class SourcePanelView(private val ctx: Context) {
             rows.add(
                 ChannelColumnView.Row.TextRow(
                     title = src.name,
-                    subtitle = if (src.url == currentUrl) "当前使用 · ${src.url}" else src.url,
+                    subtitle = null,
+                    icon = null,
                     onClick = { onSwitch(src) },
                     onLongClick = { onRemove(src) },
+                    noIcon = true,
+                    trailing = if (src.url == currentUrl) "使用中" else null,
                 )
             )
         }
         rows.add(
             ChannelColumnView.Row.TextRow(
-                "＋ 添加直播源", "点击输入地址 · 长按已有项可删除", null,
+                "＋ 添加直播源", null, null,
                 onClick = { onAdd() },
+                noIcon = true,
             )
         )
         return rows
