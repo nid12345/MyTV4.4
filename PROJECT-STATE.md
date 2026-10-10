@@ -2120,3 +2120,11 @@ v1.13 的"所有"字面上包含面板 → **回问后用户裁决：包含面�
 - 签名核对：release `versionCode='18' versionName='1.13-legacy.18'`、`minSdkVersion:'19'`、
   `targetSdkVersion:'28'`、SHA-256 `02e143e8102283c2a3d26c505ea5fa44962ff84115eb598cbed467c97236f7c2`；
   debug 包名 `top.yogiczy.mytv.legacy.debug`（Android Debug 密钥独立签名）
+- 已发布：Release `v1.13`（id 412629269）→ `https://github.com/nid12345/MyTV4.4/releases/tag/v1.13`
+  上传 release + debug 两个 APK，状态 `uploaded`；
+  源码 commit `ac2c70e`（12 文件 = 1 新增 `ClampedLinearLayout.kt` + 11 修改）
+  → `https://github.com/nid12345/MyTV4.4/commit/ac2c70ec8bf34b5b4b5d6190e145642c79d1761d`
+- 线上回验通过：`raw.githubusercontent.com/.../update/version.json` HTTP 200 / 2745 B，
+  `versionCode 18` + `1.13-legacy.18` + size 10337641 + md5 `20d26edd…`；
+  从 Release 真实下载 APK → 10,337,641 B，md5 与本地产物一致且 `cmp` 逐字节相同，
+  badging 版本号正确、签名证书 `02e143e8…` 一致
