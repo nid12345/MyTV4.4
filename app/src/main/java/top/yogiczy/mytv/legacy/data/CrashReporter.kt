@@ -1,202 +1,241 @@
 package top.yogiczy.mytv.legacy.data
 
-import okhttp3.MediaType
-import okhttp3.Request
-import okhttp3.RequestBody
-import org.json.JSONObject
+import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.util.Log
+import com.tencent.bugly.crashreport.CrashReport
 import top.yogiczy.mytv.legacy.BuildConfigCompat
-import top.yogiczy.mytv.legacy.net.Http
-import java.net.URLEncoder
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
- * 把崩溃记录一键提交到 GitHub（v1.17 需求）。
+ * 崩溃上报（v1.18 改版：国内免费、免 Token）。
  *
- * ---------------------------------------------------------------------------
- * 用户原话
- * ---------------------------------------------------------------------------
- * 「这个崩溃页面添加一个把这个崩溃记录能一键反馈上传到 GitHub 的功能，
- *   这样下次有崩溃的话直接读取 GitHub 记录就可以直接修」。
+ * ===========================================================================
+ * 为什么换掉原来的 GitHub 方案（用户原话）
+ * ===========================================================================
+ * 「当前问题：现有崩溃上报需要用户填写 GitHub Token，门槛高且国内网络不稳定。
+ *   新需求：移除 Token 依赖，改为国内免费、免 Token、点击直接上传的方案。」
  *
- * ---------------------------------------------------------------------------
- * 为什么用 REST API + 用户自备 Token，而不是把 Token 编进 APK
- * ---------------------------------------------------------------------------
- * 本仓库是**公开**的（`nid12345/MyTV4.4`），Release 里的 APK 谁都能下。
- * 只要把凭据写进代码/资源，下载 APK 的人解开就能拿到，等于把写权限交给全网 —— 不做。
+ * 原实现要用户在电视上用遥控器/扫码填一个 fine-grained PAT，还要能连上 api.github.com ——
+ * 门槛高、国内网络也常抽风。现在换成**腾讯 Bugly**：
  *
- * 所以：Token 由用户在电视上**填一次**（设置 → 关于 → 崩溃反馈设置，支持复用
- * 「手机扫码填写」把 Token 从手机贴过来，不用遥控器逐字敲），存在本机 SharedPreferences，
- * 只有真正点「反馈到 GitHub」时才用、只发往 `api.github.com`。
- * 建议用**细粒度 PAT**：只勾这一个仓库、只给 `Issues: Read and write`，丢了也不致命。
+ *   · 国内直连、免费、有网页后台（bugly.qq.com → 崩溃分析），堆栈/机型/复现次数都有；
+ *   · SDK **自动**采集 Java / Native / ANR 崩溃并上报 —— 崩了不用点任何按钮就已经在后台了；
+ *   · 不需要 Token、不需要用户在任何界面填东西；
+ *   · minSdk 15（读 AAR 内 AndroidManifest 实测），**兼容本工程的 API 19**；
+ *   · POM 无传递依赖，不会把整套 AndroidX 拖进来。
  *
- * ---------------------------------------------------------------------------
- * 去重
- * ---------------------------------------------------------------------------
- * 同一条崩溃（同一机型 / 同一版本 / 同一处堆栈）只开一个 issue：
- * 先按标题搜一次，命中就往那条 issue **追加一条评论**（天然记下"又复现了几次"），
- * 搜不到才新建。搜索失败时降级为"直接新建"，不让反馈整体失败。
+ * ===========================================================================
+ * App ID 填在哪里（唯一的一处配置，且不用在电视上操作）
+ * ===========================================================================
+ * 见下面 [BUGLY_APP_ID] / [BUGLY_APP_KEY]。申请步骤：
+ *   1. 打开 https://bugly.qq.com/v2/index 用 QQ 登录；
+ *   2. 「产品管理 → 创建产品」→ 产品类型选 **Android** → 填应用名（如 MyTV4.4）、
+ *      包名必须是 `top.yogiczy.mytv.legacy`（正式包）；
+ *   3. 创建完成后页面会给一串 **App ID**（形如 `a1b2c3d4e5`），把它填到 [BUGLY_APP_ID]；
+ *      同时会有一个 **App Key**，填进 [BUGLY_APP_KEY]（SDK 本身不用，留给将来接 HTTP 上报用）。
+ * 填完重新编译安装即可，**电视端不需要任何操作**。
  *
- * 本文件全部方法都是**同步阻塞**的，必须在后台线程调用（本工程不引协程）。
+ * ⚠️ 留空时本类**完全不初始化 SDK**：不会打错误日志、不会起后台线程，
+ * App 内的"崩溃记录 + 一键反馈"按钮仍然可用（会提示如何配置 + 提供复制）。
+ *
+ * ===========================================================================
+ * 隐私
+ * ===========================================================================
+ * Bugly 的 AAR **不自带任何权限声明**（实测其 AndroidManifest 只有 uses-sdk），
+ * 因此不会往合并后的清单里塞权限 —— 无 READ_PHONE_STATE 时它取不到 IMEI，
+ * 会自动退化成其它设备标识。本工程也不额外申请任何权限。
  */
 object CrashReporter {
 
-    private const val OWNER = "nid12345"
-    private const val REPO = "MyTV4.4"
-    private const val API = "https://api.github.com"
+    /**
+     * Bugly App ID（**唯一需要填的一处**）。留空 = 不启用 SDK。
+     *
+     * 例：`const val BUGLY_APP_ID = "a1b2c3d4e5"`
+     */
+    const val BUGLY_APP_ID = ""
 
-    /** Token 申请页（界面上直接给用户看）。 */
-    const val TOKEN_HELP_URL = "https://github.com/settings/personal-access-tokens/new"
+    /**
+     * Bugly App Key。SDK 本身初始化**不需要**它（只用 App ID），
+     * 这里留出来是为了将来若要走 Bugly 的 HTTP 上报接口时随手可用。
+     */
+    const val BUGLY_APP_KEY = ""
 
-    /** issue 列表页（反馈成功后提示用户去哪看）。 */
-    const val ISSUES_URL = "https://github.com/$OWNER/$REPO/issues"
+    /**
+     * 另一个（同样免 Token 的）通道：**免鉴权 HTTP 接口直接 POST**（用户给的备选方案）。
+     *
+     * 留空 = 不用。填上一个能收 POST 的国内地址（自己搭的、或任何免鉴权的收集服务）即可，
+     * 请求体就是崩溃正文（`text/plain`），附两个头：`X-App-Version` / `X-Device-Model`。
+     *
+     * 优先级：**Bugly App ID 优先**；只有它留空时才走这里。
+     * 两条都留空 → 一键反馈会给出"怎么配置"的说明，并提示先「复制记录」。
+     */
+    const val CRASH_UPLOAD_URL = ""
 
-    /** 上传结果。[ok] 为 false 时 [message] 是可直接展示给用户的中文原因。 */
+    private const val TAG = "崩溃上报"
+
+    /** 有没有一条可用通道（两条里有一条就行）。 */
+    val configured: Boolean get() =
+        BUGLY_APP_ID.isNotBlank() || CRASH_UPLOAD_URL.isNotBlank()
+
+    /** 上报结果。[ok] 为 false 时 [message] 是可直接展示给用户的中文说明。 */
     class Result(val ok: Boolean, val message: String)
 
     /**
-     * issue 标题：`[崩溃] ClassCastException · 1.17-legacy.22`。
+     * 初始化 SDK（由 `App.onCreate` 调用，必须早于任何业务代码 —— 崩溃可能发生在启动阶段）。
      *
-     * 结构固定（"前缀 + 异常简单类名 + 版本"）是为了两件事：
-     *  · 在 GitHub 上按 `[崩溃]` 一筛就是全部崩溃类 issue；
-     *  · 搜索去重时能**精确按标题**命中同一条，不必解析正文。
+     * 没配 App ID 时直接跳过：Bugly 未初始化时会往日志里刷"appId is empty"这类错误，
+     * 而本工程的真机排障全靠 logcat，不能被这种噪音淹掉。
      */
-    fun issueTitle(report: String): String {
-        val head = exceptionLine(report).substringBefore(':').trim()
-        val simple = head.substringAfterLast('.').ifBlank { head }.ifBlank { "未知异常" }
-        return "[崩溃] $simple · ${BuildConfigCompat.VERSION_NAME}"
+    fun init(ctx: Context) {
+        if (BUGLY_APP_ID.isBlank()) {
+            Log.i(
+                TAG,
+                "未配置 Bugly App ID：跳过 SDK 初始化（崩溃仍会本地留档，可在应用内查看/复制）"
+            )
+            return
+        }
+        val debuggable = (ctx.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        runCatching { CrashReport.initCrashReport(ctx, BUGLY_APP_ID, debuggable) }
+            .onSuccess { Log.i(TAG, "Bugly 已初始化：AppID=$BUGLY_APP_ID debug=$debuggable 版本=${BuildConfigCompat.VERSION_NAME}") }
+            .onFailure { Log.w(TAG, "Bugly 初始化失败：${it.javaClass.simpleName} ${it.message ?: ""}") }
     }
 
     /**
-     * 从正文里挑出"异常那一行"。
+     * 「一键反馈」：把本地存下来的那条崩溃**当作一次已捕获异常**上报给 Bugly。
      *
-     * 正文格式由 `App.installCrashLogger` 决定：3 行头部（机型 / Android / 版本）+ 空行 + 堆栈。
-     * 这里不按下标取（将来头部行数改了会 silently 取错），而是**按内容找**：
-     * 第一个含 `Exception` / `Error` 的行；都找不到就退化成第一行非空行。
-     */
-    private fun exceptionLine(report: String): String = report.lineSequence()
-        .map { it.trim() }
-        .firstOrNull { it.contains("Exception") || it.contains("Error") }
-        ?: report.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
-
-    /**
-     * 上传（阻塞）。调用方必须在后台线程执行。
+     * 为什么用 `postCatchedException(Throwable)`：这是 Bugly 公开 API 里唯一
+     * "把一段异常交上去"的入口（它走的是与真实崩溃同一条上报通道，后台能看到完整堆栈）。
+     * 我们按崩溃记录里的 `at ...` 行**还原成 StackTraceElement**，于是后台看到的
+     * 帧信息与真实崩溃一致（文件名 + 行号），而不是一串挤在 message 里的纯文本。
      *
-     * @param token  用户配置的 GitHub Token（细粒度 PAT，Issues: Read and write）
-     * @param report 崩溃正文（[CrashStore.Record.text]）
+     * 说明：这是**异步**上报 —— 调用返回只代表"已交给 SDK 队列"，不是"服务器已收到"。
+     * 所以成功文案写的是"已提交/稍后可在后台看到"，不打包票。
      */
-    fun upload(token: String, report: String): Result {
-        val tk = token.trim()
-        if (tk.isEmpty()) return Result(false, "还没配置 GitHub Token（设置 → 关于 → 崩溃反馈设置）")
-
-        val title = issueTitle(report)
-        val body = buildBody(report)
-
-        // ① 查同名 issue：查到就追加评论，避免同一条崩溃刷出一堆 issue。
-        //    搜索失败**不影响**反馈本身（降级为新建），所以这里吞掉异常。
-        val dupNumber = runCatching { findOpenIssueNumber(tk, title) }.getOrNull()
-
-        return if (dupNumber != null) {
-            commentIssue(tk, dupNumber, body)
-        } else {
-            createIssue(tk, title, body)
+    fun upload(ctx: Context, recordText: String): Result {
+        if (!configured) {
+            return Result(
+                false,
+                "还没有配置崩溃上报服务（代码里两个常量都留着空：\n" +
+                    "CrashReporter.BUGLY_APP_ID 或 CrashReporter.CRASH_UPLOAD_URL）。\n\n" +
+                    "这是在电脑上做一次的事，电视端不需要任何操作：\n" +
+                    "· 腾讯 Bugly（推荐，国内直连、有后台）：\n" +
+                    "  1) bugly.qq.com 用 QQ 登录 → 创建产品 → Android\n" +
+                    "  2) 包名填 top.yogiczy.mytv.legacy\n" +
+                    "  3) 把 App ID 填进 CrashReporter.BUGLY_APP_ID\n" +
+                    "· 或者填任意一个能收 POST 的国内地址到 CRASH_UPLOAD_URL\n\n" +
+                    "在此之前可以先点「复制记录」，把这条堆栈直接发给开发者。",
+            )
         }
+        if (BUGLY_APP_ID.isNotBlank()) return uploadToBugly(recordText)
+        return uploadByHttp(recordText)
     }
 
-    /** 正文：把原始记录放进代码块（GitHub 上等宽显示，堆栈对齐不会乱）。 */
-    private fun buildBody(report: String): String {
-        val whenText = runCatching {
-            SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
-        }.getOrDefault("-")
-        return buildString {
-            append("由电视端应用「一键反馈」自动提交（电视本地时间 ")
-            append(whenText).append("）。\n\n")
-            append("```\n")
-            append(report.trim())
-            append("\n```\n")
-        }
-    }
-
-    // ---------------- GitHub REST ----------------
-
-    /** 搜同名且仍打开的 issue，返回编号；没有则 null。 */
-    private fun findOpenIssueNumber(token: String, title: String): Int? {
-        val q = URLEncoder.encode("repo:$OWNER/$REPO in:title state:open \"$title\"", "UTF-8")
-        val (code, resp) = call("GET", "$API/search/issues?q=$q", null, token)
-        if (code != 200) return null
-        val items = runCatching { JSONObject(resp).optJSONArray("items") }.getOrNull() ?: return null
-        // 搜索是模糊匹配，这里再严格比一次标题（只认完全相同的标题）
-        for (i in 0 until items.length()) {
-            val o = items.optJSONObject(i) ?: continue
-            if (o.optString("title") == title) return o.optInt("number", 0).takeIf { it > 0 }
-        }
-        return null
-    }
-
-    private fun createIssue(token: String, title: String, body: String): Result {
-        val payload = JSONObject().put("title", title).put("body", body).toString()
-        val (code, resp) = call("POST", "$API/repos/$OWNER/$REPO/issues", payload, token)
-        if (code == 201) {
-            val number = runCatching { JSONObject(resp).optInt("number", 0) }.getOrDefault(0)
-            return Result(true, "已提交到 GitHub：issue #$number\n（$ISSUES_URL）")
-        }
-        return Result(false, explain(code, resp, "新建 issue"))
-    }
-
-    private fun commentIssue(token: String, number: Int, body: String): Result {
-        val payload = JSONObject().put("body", body).toString()
-        val (code, resp) = call("POST", "$API/repos/$OWNER/$REPO/issues/$number/comments", payload, token)
-        if (code == 201) {
-            return Result(true, "这条崩溃之前已经报过，已在 issue #$number 下追加一条记录")
-        }
-        return Result(false, explain(code, resp, "追加记录"))
-    }
-
-    /**
-     * 一次 REST 调用。返回 `(状态码, 正文)`。
-     *
-     * 用 [Http.client] 而不是自己 new OkHttpClient —— 那里统一挂了 **TLS 1.2**
-     * （API 19 必需，见 `net/Http.kt` 的长注释），另起一套必然漂移。
-     * 老电视的系统时间可能不准，`api.github.com` 走的是普通 TLS 校验（不校验时间戳），
-     * 所以时间不准不会挡住反馈。
-     */
-    private fun call(method: String, url: String, body: String?, token: String): Pair<Int, String> {
-        val builder = Request.Builder()
-            .url(url)
-            .header("Authorization", "token $token")
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-        if (body != null) {
-            builder.method(method, RequestBody.create(MediaType.parse(JSON_CONTENT_TYPE), body))
-        } else {
-            builder.method(method, null)
-        }
-        val client = Http.client(
-            connectTimeoutMs = 10_000L,
-            readTimeoutMs = 20_000L,
-            userAgent = "MyTV-Legacy-CrashReporter",
+    /** 通道一：腾讯 Bugly。 */
+    private fun uploadToBugly(recordText: String): Result = runCatching {
+        CrashReport.postCatchedException(toThrowable(recordText))
+        Result(
+            true,
+            "已提交到腾讯 Bugly。\n\n" +
+                "查看位置：bugly.qq.com → 选「MyTV4.4」→ 崩溃分析\n" +
+                "（上报是异步的，通常 1 分钟内出现；同一条崩溃会按「异常类型 + 版本」聚合，\n" +
+                "能直接看到复现次数）\n\n版本：${BuildConfigCompat.VERSION_NAME}",
         )
-        val response = client.newCall(builder.build()).execute()
-        response.use { resp ->
-            return resp.code() to resp.body()?.string().orEmpty()
+    }.getOrElse {
+        Result(
+            false,
+            "上报失败：${it.javaClass.simpleName}${it.message?.let { m -> "（$m）" } ?: ""}\n可先「复制记录」发给开发者。"
+        )
+    }
+
+    /**
+     * 通道二：免鉴权 HTTP 直传。
+     *
+     * 走的是 `net/Http.postRaw` —— 它统一带着 v1.17 补的那套现代根证书，
+     * 在 Android 4.4 / 6.0 上不会因为老 CA 库缺锚点而报
+     * `Trust anchor for certification path not found`。
+     */
+    private fun uploadByHttp(recordText: String): Result {
+        val model = android.os.Build.MODEL
+        return runCatching {
+            val (code, body) = top.yogiczy.mytv.legacy.net.Http.postRaw(
+                url = CRASH_UPLOAD_URL,
+                body = recordText,
+                contentType = "text/plain; charset=utf-8",
+                extraHeaders = mapOf(
+                    "X-App-Version" to BuildConfigCompat.VERSION_NAME,
+                    "X-Device-Model" to model,
+                ),
+            )
+            if (code in 200..299) {
+                Result(true, "已提交（HTTP $code）。\n\n查看位置：你配置的那个收集服务。\n版本：${BuildConfigCompat.VERSION_NAME}")
+            } else {
+                Result(false, "上报失败：服务端返回 HTTP $code\n${body.take(200)}\n可先「复制记录」发给开发者。")
+            }
+        }.getOrElse {
+            Result(
+                false,
+                "上报失败：${it.javaClass.simpleName}${it.message?.let { m -> "（$m）" } ?: ""}\n可先「复制记录」发给开发者。"
+            )
         }
     }
 
-    /** 把 HTTP 状态码翻成用户能看懂的中文原因（老电视上没法看 logcat，文案必须自解释）。 */
-    private fun explain(code: Int, body: String, action: String): String {
-        val hint = when (code) {
-            401 -> "Token 无效或已被吊销"
-            403 -> "Token 权限不足（需要对该仓库开 Issues 的 Read and write），或已触发频率限制"
-            404 -> "仓库不可见：Token 里没勾上 $OWNER/$REPO"
-            422 -> "GitHub 拒绝了内容（可能标题/正文格式问题）"
-            301, 302 -> "请求被重定向（Token 或网络异常）"
-            in 500..599 -> "GitHub 服务暂时异常（HTTP $code）"
-            else -> "HTTP $code"
+    // ---------------- 记录 → Throwable ----------------
+
+    /**
+     * 把本地的崩溃正文还原成一个 [Throwable]。
+     *
+     * 正文格式（见 `CrashStore.save`）：
+     * ```
+     * 机型: MI TV4-ANSM0
+     * Android: 6.0.1 (API 23)
+     * 版本: 1.16-legacy.21
+     *
+     * java.lang.ClassCastException: xxx cannot be cast to yyy
+     * 	at androidx.recyclerview.widget.RecyclerView.getChildViewHolderInt(RecyclerView.java:4989)
+     * 	at top.yogiczy.mytv.legacy.MainActivity.handlePanelEdgeMove(MainActivity.kt:1655)
+     * ```
+     */
+    private fun toThrowable(recordText: String): Throwable {
+        val lines = recordText.trim().lines()
+        val head = lines.firstOrNull { it.contains("Exception") || it.contains("Error") }
+            ?: lines.firstOrNull().orEmpty()
+        // message 里带上机型与版本：Bugly 后台的"异常详情 → 异常信息"里能直接看到，
+        // 免得在两个页面之间来回对版本号。
+        val model = lines.firstOrNull { it.startsWith("机型") }.orEmpty()
+        val version = lines.firstOrNull { it.startsWith("版本") }.orEmpty()
+        val throwable = Throwable("[手动反馈] ${head.take(300)}${if (model.isEmpty()) "" else "｜$model｜$version"}")
+
+        val frames = ArrayList<StackTraceElement>()
+        lines.forEach { raw ->
+            val l = raw.trim()
+            if (l.startsWith("at ")) frameOf(l.removePrefix("at "))?.let { frames.add(it) }
         }
-        val detail = runCatching { JSONObject(body).optString("message") }.getOrDefault("")
-        return "反馈失败（$action）：$hint" + if (detail.isNotBlank()) "\n$detail" else ""
+        if (frames.isNotEmpty()) throwable.stackTrace = frames.toTypedArray()
+        return throwable
     }
 
-    private const val JSON_CONTENT_TYPE = "application/json; charset=utf-8"
+    /**
+     * 解析一帧：`com.foo.Bar.baz(Bar.java:123)` / `(Native Method)` / `(Unknown Source)`。
+     *
+     * 解析不出来就返回 null（宁可少一帧，也不要造一个假的帧 —— 后台是按帧聚类定位的）。
+     */
+    private fun frameOf(s: String): StackTraceElement? {
+        val open = s.lastIndexOf('(')
+        val close = s.lastIndexOf(')')
+        if (open <= 0 || close != s.length - 1) return null
+        val decl = s.substring(0, open)
+        val file = s.substring(open + 1, close)
+        val dot = decl.lastIndexOf('.')
+        if (dot <= 0) return null
+        val cls = decl.substring(0, dot)
+        val method = decl.substring(dot + 1)
+        return when {
+            file == "Native Method" -> StackTraceElement(cls, method, null, -2)
+            file == "Unknown Source" -> StackTraceElement(cls, method, null, -1)
+            else -> {
+                val idx = file.substringAfterLast(':').toIntOrNull() ?: -1
+                StackTraceElement(cls, method, file.substringBeforeLast(':'), idx)
+            }
+        }
+    }
 }

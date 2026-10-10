@@ -7,6 +7,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -56,6 +57,15 @@ class LevelBarView(context: Context) : FrameLayout(context) {
     init {
         // 不拦截触摸：手势本身就是靠 [MainActivity.dispatchTouchEvent] 的旁路处理的，
         // 这里若吃掉触摸，手指抬起时的 tap 判定会受影响。
+        //
+        // v1.18 需求 5（用户原话）：「弹出的亮度/音量调节弹窗（浮层），会遮挡或拦截触摸事件，
+        // 影响触屏调节区域的有效判定。修改要求：让弹窗不干扰触屏范围」——
+        // 这一层是**满屏**的浮层，所以"不拦触摸"必须落到实处，四道保险：
+        //   ① `isClickable = false` / `isFocusable = false`（不参与点击与焦点）；
+        //   ② 子视图（卡片、竖条）同样是纯绘制 View，没有任何 clickable；
+        //   ③ [onTouchEvent] 显式返回 false（哪怕将来有人手滑加了 clickable 也不会吃掉事件）；
+        //   ④ 宿主的边缘手势在 `dispatchTouchEvent` 里**早于视图树**拿到事件，
+        //      热区判定用的是根视图宽度（与触点同坐标系），与本浮层在不在屏上无关。
         isClickable = false
         isFocusable = false
         descendantFocusability = FOCUS_BLOCK_DESCENDANTS
@@ -117,6 +127,15 @@ class LevelBarView(context: Context) : FrameLayout(context) {
     fun hide() {
         visibility = View.GONE
     }
+
+    /**
+     * v1.18 需求 5：**显式**声明"这一层不吃触摸"。
+     *
+     * 默认实现本来就会因为 `isClickable = false` 返回 false，但这里写死一个 false
+     * 是为了把需求钉在代码里：将来谁给这个浮层加了 clickable / 背景选择器，
+     * 也不会因此把满屏的边缘热区"吃掉"（用户的报障就是这个方向）。
+     */
+    override fun onTouchEvent(event: MotionEvent): Boolean = false
 
     private fun s(dp: Float): Int = (dp * resources.displayMetrics.density).toInt()
 

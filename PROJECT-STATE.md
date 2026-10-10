@@ -25,13 +25,13 @@
 ## 当前进度
 
 - 已完成：**M0 / M1 / M2 / M3（含三项补测） / M4 / M5 / M6 / M7 / M8 / M9 / M10 / M13 / M14**
-- 已交付版本：**v1.0 → v1.17**（`versionCode 6 → 22`），全部已发 GitHub Release（tag `v1.8` / `v1.10`～`v1.17`）
+- 已交付版本：**v1.0 → v1.18**（`versionCode 6 → 23`），全部已发 GitHub Release（tag `v1.8` / `v1.10`～`v1.18`）
 - 进行中：**无**
-- **最新产物**：`dist/MyTV4.4-v1.17-legacy22.apk`（release）/ `dist/MyTV4.4-v1.17-legacy22-debug.apk`
+- **最新产物**：`dist/MyTV4.4-v1.18-legacy23.apk`（release）/ `dist/MyTV4.4-v1.18-legacy23-debug.apk`
 - **签名**：`keystore/mytv-release.jks`（alias=mytv，需备份）；
   SHA-256 `02e143e8102283c2a3d26c505ea5fa44962ff84115eb598cbed467c97236f7c2`（v1.7 起未换钥）
 - **阻塞**：无
-- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.17 = `versionCode 22`）
+- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.18 = `versionCode 23`）
 - 下一个强制汇报检查点：**下一轮用户需求到来时**
 
 ## 📌 已知偏差（记入不追究）
@@ -2357,3 +2357,35 @@ Android 4.4/6.0 的 CA 库里没有该锚 → `Trust anchor for certification pa
   线上回验：清单 versionCode 22 / size 10391413 / md5 a20e744c… 与本地产物一致，
   从 Release 取回的 APK `cmp` 逐字节相同、badging 与证书 `02e143e8…` 一致
 - 关联 issue：**#1**（本次真机报障的崩溃记录，已由电视端一键反馈创建，附修复说明后关闭）
+---
+
+# v1.18（versionCode 23 / `1.18-legacy.23`，2026-10-16）
+
+四组需求：二级菜单跨组规则统一、设置页焦点分层、触屏调节 1/6 热区、崩溃上报去 Token 换 Bugly。
+
+## 实现要点（签名级）
+
+| 需求 | 入口 |
+|---|---|
+| 二级菜单跨组统一 | `handlePanelEdgeMove` + 新增 `isCrossGroupEntry`（换源/系统应用排除）/ `entryHasRows`（空组跳过）/ `nextCrossGroupEntry`（找不到不消费）；判据用 label 不用序号（换源后立即生效） |
+| 设置页焦点分层 | `SettingsView.installContentKeyRules`（右栏每行递归装键规则：↑↓ 恒消费、← 回一级）；`handleBack` 焦点在右栏时 `focusCategory()` 并返回 true |
+| 触屏 1/6 热区 | `edgeZoneOf(x, width)`（width 来自 `touchWidth()` = rootView 宽）；`edgeAdjustAllowed()` = `overlayStack().isEmpty()`；`LevelBarView` 不消费触摸 |
+| 崩溃上报去 Token | 删 `Prefs.githubToken` / `reportCrashToGithub` / Token 输入链路；重写 `data/CrashReporter.kt`（Bugly 4.1.9.3 `postCatchedException` + 备选 `CRASH_UPLOAD_URL` HTTP 直传）；`App.onCreate` 先 `CrashReporter.init` 再装本地记录器；设置页「崩溃反馈设置」删除 |
+
+## 关键决策
+
+1. **跨组规则按 label 判定**：分组数量随订阅源变，写死序号会在换源后失效（需求 7）。
+2. **二级菜单的 ↑↓ 必须"到边界也吃掉"**：Android 焦点搜索是几何的，右栏第一行按上会斜跳到左栏——只有显式消费才保证"绝不跳一级"。
+3. **调节条不算弹层**：`overlayStack()` 判空时不把 `LevelBarView` 算进去（需求 5 明确要求条在屏时还能继续调），它本身不消费触摸所以不影响热区。
+4. **Bugly 留空 App ID = 完全静默**：不初始化、不报错、不起线程；一键反馈给配置说明 + 复制兜底。`CRASH_UPLOAD_URL` 备选通道已用本地 HTTP 服务端到端验证（正文 + 两个自定义头全部到达）。
+5. **Bugly 兼容性实测**：4.1.9.3 AAR manifest `minSdkVersion=15`、无权限声明、POM 无传递依赖——不破坏 API 19 与"零敏感权限"的承诺。
+
+## ⚠️ 待办（用户）
+
+Bugly App ID 需注册后填进 `CrashReporter.BUGLY_APP_ID`（QQ 登录 bugly.qq.com → 创建产品 → 包名 `top.yogiczy.mytv.legacy`），重新出包即生效。
+
+## 产物（v1.18，versionCode 23）
+
+- `dist/MyTV4.4-v1.18-legacy23.apk`（release **10,944,241 B**，MD5 `e236b5cc24cb2a655ee6f8211c15cebb`，证书 `02e143e8…`）
+- `dist/MyTV4.4-v1.18-legacy23-debug.apk`（debug **13,570,247 B**，MD5 `432a49b3a6ec8c811712e067e18aa008`，zipalign+重签）
+- `update/version.json` → v1.18 清单；交付报告 `dist/v1.18-报告.md`；截图 `dist/evidence/v1.18/`

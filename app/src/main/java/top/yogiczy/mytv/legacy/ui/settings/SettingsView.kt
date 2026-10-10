@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -70,11 +71,8 @@ class SettingsView(context: Context) : LinearLayout(context) {
     var onResetAll: (() -> Unit)? = null
     var onSettingChanged: (() -> Unit)? = null
 
-    /** v1.17：「关于 → 崩溃记录」——查看上次崩溃堆栈并（一键）反馈到 GitHub。 */
+    /** v1.17：「关于 → 崩溃记录」——查看上次崩溃堆栈并一键上报（v1.18 起走腾讯 Bugly）。 */
     var onCrashRecord: (() -> Unit)? = null
-
-    /** v1.17：「关于 → 崩溃反馈设置」——录入 GitHub Token（复用手机扫码填写）。 */
-    var onFeedbackSetting: (() -> Unit)? = null
 
     init {
         orientation = HORIZONTAL
@@ -285,6 +283,95 @@ class SettingsView(context: Context) : LinearLayout(context) {
         }
     }
 
+    // =========================================================================
+    // v1.18 需求（用户原话）：
+    //   「二级菜单上下键只能在当前二级菜单内部移动，绝对不能跳到一级菜单。
+    //     除非按返回键或左键，焦点才能回到一级菜单。（回到二级菜单对应的一级菜单
+    //     选项的位置上）」
+    // =========================================================================
+
+    /**
+     * 给右栏的**一行**（含行内可聚焦的子控件）装上方向键规则。
+     *
+     * 【为什么必须显式接管，而不是靠布局】Android 的焦点搜索是**几何**的：
+     * 右栏第 1 行按「上」时，焦点系统会去找它斜上方的最近可聚焦视图 —— 那正好是
+     * **左栏的分类行**，于是"右栏按上键跑到一级菜单去了"。这是实测现象，不是理论担心。
+     * 布局再怎么调也保证不了，只能自己处理掉边界按键。
+     *
+     * 【为什么要递归装到子控件上】行的焦点可能在行本身（普通设置行），也可能落在行内的
+     * 可聚焦子控件上（例如开关 SwitchCompat）。只装在行上时，后一种情况按上下键仍会被
+     * 系统接走。
+     *
+     * ⚠️ 只接管**上下左**三个键：
+     *   · 上下 —— 在右栏内部移动，到边界原地不动；
+     *   · 左   —— 回到一级菜单（落在**当前选中的分类**上）。
+     * 右键不接管：进入右栏后右键没有别的去处，交给系统即可；返回键由宿主统一处理
+     * （见 [handleBack]）。
+     */
+    private fun installContentKeyRules(view: View) {
+        if (view.isFocusable) {
+            view.setOnKeyListener { _, code, ev ->
+                if (ev.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                when (code) {
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        moveContentFocus(-1)
+                        true      // ← 即使已经在第一行也**吃掉**：这就是"绝不跳到一级菜单"
+                    }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        moveContentFocus(+1)
+                        true      // ← 同理，最后一行不再往下跑
+                    }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        focusCategory()
+                        true
+                    }
+                    else -> false
+                }
+            }
+        }
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) installContentKeyRules(view.getChildAt(i))
+        }
+    }
+
+    /**
+     * 在右栏内部上下移动焦点一格；已经在边界时返回 false（交由调用方吃掉按键）。
+     *
+     * 用的是 adapter 无关的"同行内 child 顺序"：右栏是 LinearLayout，顺序即视觉顺序。
+     * 不可见 / 不可聚焦的行会被跳过（例如某些分类里的纯说明行）。
+     */
+    private fun moveContentFocus(delta: Int): Boolean {
+        val cur = contentColumn.findFocus() ?: return false
+        var node: View = cur
+        while (node.parent !== contentColumn) {
+            node = node.parent as? View ?: return false
+        }
+        val i = contentColumn.indexOfChild(node)
+        if (i < 0) return false
+        var j = i + delta
+        while (j in 0 until contentColumn.childCount) {
+            val v = contentColumn.getChildAt(j)
+            if (v.visibility == View.VISIBLE && v.isFocusable && v.requestFocus()) {
+                scrollContentIntoView(v)
+                return true
+            }
+            j += delta
+        }
+        return false
+    }
+
+    /** 把焦点还给左栏，并落在**当前选中的那个分类**上（需求：回到对应的一级菜单选项位置）。 */
+    fun focusCategory() {
+        catColumn.getChildAt(selected)?.requestFocus()
+    }
+
+    /** 右栏在 ScrollView 里，移动焦点后把它滚进可视区，否则焦点会跑出屏幕（用户看不见）。 */
+    private fun scrollContentIntoView(v: View) {
+        val sv = contentColumn.parent as? ScrollView ?: return
+        val target = v.top - (sv.height - v.height) / 2
+        sv.smoothScrollTo(0, target.coerceAtLeast(0))
+    }
+
     /**
      * v1.11（用户需求 2）：记下**手指刚落在右栏哪一行**。
      *
@@ -405,11 +492,8 @@ class SettingsView(context: Context) : LinearLayout(context) {
             contentColumn.removeAllViews()
         val ctx = context
         val rows = when (SettingsCategory.ALL[selected]) {
-            SettingsCategory.ABOUT -> SettingsCats.about(
-                ctx,
-                { onCrashRecord?.invoke() },
-                { onFeedbackSetting?.invoke() },
-            )
+            // v1.18：原来的「崩溃反馈设置」回调已删除（Bugly 不需要电视端配置）
+            SettingsCategory.ABOUT -> SettingsCats.about(ctx, { onCrashRecord?.invoke() })
             SettingsCategory.APP -> SettingsCats.app(ctx,
                 { onResetAll?.invoke() }, { onCheckUpdate?.invoke() })
             SettingsCategory.IPTV -> SettingsCats.iptv(ctx,
@@ -435,6 +519,8 @@ class SettingsView(context: Context) : LinearLayout(context) {
             // 复用的成员视图先摘父，否则二次入树必抛
             // IllegalStateException: The specified child already has a parent.
             detachFromParent(v)
+            // v1.18 需求：二级菜单内部的方向键规则（一处安装，覆盖整个右栏所有类型的行）
+            installContentKeyRules(v)
             contentColumn.addView(v, LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = UiKit.dp(ctx, 8f) })
@@ -543,11 +629,23 @@ class SettingsView(context: Context) : LinearLayout(context) {
     val isOpen: Boolean get() = visibility == VISIBLE
 
     /** 返回键：焦点在右栏则回到左栏，否则关闭。 */
+    /**
+     * 返回键的分层处理（宿主 [MainActivity.onBackPressed] 调）。
+     *
+     * v1.18 需求（用户原话）：「二级菜单上下键只能在当前二级菜单内部移动，绝对不能跳到
+     * 一级菜单。**除非按返回键或左键**，焦点才能回到一级菜单。（回到二级菜单对应的一级
+     * 菜单选项的位置上）」——
+     * 这里正好就是那个语义：焦点在二级菜单里 → 退回一级（落在**当前分类**上）、
+     * 这次返回键到此为止；已经在一级菜单里 → 才关掉设置页。
+     *
+     * `hasFocus()` 对"行本身或行内子控件"都返回 true，所以焦点落在开关上也一样能退回。
+     */
     fun handleBack(): Boolean {
         if (!isOpen) return false
         for (i in 0 until contentColumn.childCount) {
             if (contentColumn.getChildAt(i).hasFocus()) {
-                catColumn.getChildAt(selected)?.requestFocus()
+                focusCategory()
+                UiLog.i("设置", "返回键：焦点从二级菜单退回一级菜单（${SettingsCategory.ALL[selected].title}）")
                 return true
             }
         }

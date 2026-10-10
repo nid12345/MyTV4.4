@@ -593,14 +593,48 @@ class MainActivity : AppCompatActivity() {
     /** 左 1/4 = 亮度区，右 1/4 = 音量区，中间一半留给换台手势。 */
     private enum class EdgeZone { BRIGHTNESS, VOLUME }
 
-    private fun edgeZoneOf(x: Float): EdgeZone? {
-        val w = resources.displayMetrics.widthPixels
+    /**
+     * v1.18 需求 3（用户原话）：
+     *   「最左侧占屏幕宽度的 1/6 区域：上下滑动调节亮度。最右侧占屏幕宽度的 1/6 区域：
+     *     上下滑动调节音量。」
+     *
+     * v1.14 起热区是左右各 **1/4**，本轮按用户要求收窄到 **1/6**。
+     *
+     * @param x     触点横坐标（必须与 [width] 同一坐标系）
+     * @param width 判定基准宽度。**刻意传"视图宽度"而不是 `DisplayMetrics.widthPixels`**：
+     *              本工程有「界面整体缩放比例」（见 [Density]），缩放态下两者不相等，
+     *              用错参照系热区就会跟着漂 —— 而需求 5 要的正是"热区不因任何东西改变"。
+     *              根视图宽度与触点坐标天然同一坐标系，是最稳的参照。
+     */
+    private fun edgeZoneOf(x: Float, width: Int): EdgeZone? {
+        if (width <= 0) return null
+        val band = width / 6f
         return when {
-            x < w * 0.25f -> EdgeZone.BRIGHTNESS
-            x > w * 0.75f -> EdgeZone.VOLUME
+            x < band -> EdgeZone.BRIGHTNESS
+            x > width - band -> EdgeZone.VOLUME
             else -> null
         }
     }
+
+    /** 边缘热区的判定基准宽度：优先根视图（与触点同坐标系），退化到窗口宽度。 */
+    private fun touchWidth(): Int =
+        if (::rootView.isInitialized && rootView.width > 0) rootView.width
+        else resources.displayMetrics.widthPixels
+
+    /**
+     * v1.18 需求 3/4（用户原话）：
+     *   「触发条件：只有在播放界面完全没有任何弹窗、菜单（包括左侧菜单、总菜单等）的情况下，
+     *     才允许触发」「任何弹窗或菜单显示时，禁止触发这两个触屏调节功能」。
+     *
+     * 判据直接复用 [overlayStack]：它列出的正是"当前在屏的所有覆盖层"
+     * （三段式面板 / 快捷菜单 / 设置页 / 各种抽屉与弹窗 / 加载提示 / 使用须知）。
+     * 为空 = 干净的播放界面。
+     *
+     * ⚠️ **刻意不把亮度/音量调节条算进覆盖层**：它只是个提示浮层，
+     * 需求 5 明确要求"弹窗显示时，在 1/6 区域滑动依然能正常调节"。
+     * 它的 [LevelBarView] 也从不消费触摸（见那边的注释），所以不会改变热区判定。
+     */
+    private fun edgeAdjustAllowed(): Boolean = overlayStack().isEmpty()
 
     private fun showLevelBar(kind: LevelBarView.Kind, value: Float) {
         if (!::rootView.isInitialized) return
@@ -610,6 +644,9 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         }
         v.show(kind, value)
+        // ⚠️ bringToFront 只影响**绘制顺序**：调节条本身 isClickable/isFocusable 都是 false、
+        //    且不消费触摸，所以"提到最前"不会挡住边缘热区、也不会影响手势分发
+        //    （手势在 [dispatchTouchEvent] 里**早于**视图树拿到事件，见那边的注释）。
         v.bringToFront()
         handler.removeCallbacks(levelBarHide)
         handler.postDelayed(levelBarHide, LEVEL_BAR_HIDE_MS)
@@ -1051,7 +1088,7 @@ class MainActivity : AppCompatActivity() {
     private fun showCrashDialog(rec: CrashStore.Record) {
         crashDialogOpen = true
         val msg = buildString {
-            append("机型 / 版本都在下面这段里，直接反馈即可定位。\n\n")
+            append("机型 / 版本都在下面这段里，一键反馈即可定位。\n\n")
             append(rec.text.trim())
         }
         val built = AppDialog.buildMessage(
@@ -1059,7 +1096,9 @@ class MainActivity : AppCompatActivity() {
             "上次启动崩溃了",
             msg,
             listOf(
-                "反馈到 GitHub" to { reportCrashToGithub(rec) },
+                // v1.18：按钮从「反馈到 GitHub」改成「一键反馈」——
+                // 底层换成腾讯 Bugly，**不再需要 Token、也没有任何前置配置步骤**。
+                "一键反馈" to { reportCrash(rec) },
                 "复制记录" to { copyCrashReport(rec) },
                 "关闭" to { dismissCrashDialog(rec) },
             ),
@@ -1096,109 +1135,62 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 「反馈到 GitHub」。
+     * 「一键反馈」：把这条崩溃上报到**腾讯 Bugly**（v1.18 起）。
      *
-     * 没配 Token 时**先教怎么配**（而不是报一句"失败"）：Token 支持复用「手机扫码填写」，
-     * 手机上登录 GitHub 生成细粒度 PAT 再扫过来，不用遥控器敲那串字符。
+     * 用户原话：「移除 Token 依赖，改为国内免费、免 Token、点击直接上传的方案」
+     * 「保留原有的"一键反馈"按钮逻辑，点击后直接触发上传，无需用户额外配置」。
+     *
+     * 所以这里再也没有 Token 输入、没有任何"先配置一下"的前置步骤：
+     * 点下去就把记录交给 Bugly 的上报通道（App ID 只填在代码里一处，电视端零操作）。
+     *
+     * ⚠️ 上报是**异步**的，所以文案只说"已提交"，不打包票说"服务器已收到" ——
+     * 老网络环境下宁可让用户去后台确认，也不要给一个假的成功感。
      */
-    private fun reportCrashToGithub(rec: CrashStore.Record) {
-        val token = Prefs.githubToken(this)
-        if (token.isBlank()) {
-            showCrashTokenIntro()
-            return
-        }
-        // 上传期间给一个"正在…"的反馈并关掉崩溃窗口，避免用户以为按了没反应
+    private fun reportCrash(rec: CrashStore.Record) {
+        // 先关掉崩溃窗口并给一条"正在…"的反馈，避免用户以为按了没反应
         crashDialogOpen = false
         handler.removeCallbacks(crashDialogAutoClose)
         closeAppDialog()
-        showBottomStatus("正在把崩溃记录提交到 GitHub…", sticky = true)
-        UiLog.i("崩溃", "开始反馈：${CrashReporter.issueTitle(rec.text)}")
+        showBottomStatus("正在上报崩溃记录…", sticky = true)
+        UiLog.i("崩溃", "开始上报（Bugly）：${rec.exceptionName} / ${rec.fingerprint}")
 
+        // Bugly 的 postCatchedException 本身是异步的，这里仍放后台线程：
+        // 一是不占主线程，二是给"将来换成 HTTP 直传"留出同样的调用形状。
         Thread {
             val result = try {
-                CrashReporter.upload(token, rec.text)
+                CrashReporter.upload(this, rec.text)
             } catch (t: Throwable) {
-                CrashReporter.Result(false, "网络异常（${t.javaClass.simpleName}：${t.message ?: "无描述"}）")
+                CrashReporter.Result(false, "上报异常（${t.javaClass.simpleName}：${t.message ?: "无描述"}）")
             }
             handler.post {
+                clearBottomStatus()
                 if (result.ok) {
-                    UiLog.i("崩溃", "反馈成功：${result.message.replace('\n', ' ')}")
-                    CrashStore.clear(this)          // 已经上了 GitHub，本地不再拦人
-                    clearBottomStatus()
-                    showCrashResultDialog("已反馈", result.message, null)
+                    UiLog.i("崩溃", "上报成功：${result.message.replace('\n', ' ')}")
+                    // 记下"这条已经处理过"：下次启动不再弹全屏，只在底部提一行。
+                    // ⚠️ **不清记录**：内容还有价值（用户可能想看/想再复制一次），
+                    //    而且 Bugly 是异步上报，留档也方便对不上时再发一次。
+                    CrashStore.markAcked(this, rec)
+                    showCrashResultDialog("已上报", result.message, null)
                 } else {
-                    UiLog.w("崩溃", "反馈失败：${result.message.replace('\n', ' ')}")
-                    clearBottomStatus()
-                    showCrashResultDialog("反馈失败", result.message, rec)
+                    UiLog.w("崩溃", "上报失败：${result.message.replace('\n', ' ')}")
+                    showCrashResultDialog("上报失败", result.message, rec)
                 }
             }
         }.start()
     }
 
-    /** 反馈结果弹窗。失败时给一条「重试」——**记录还留着**，重试不需要重新找堆栈。 */
+    /** 上报结果弹窗。失败时给一条「重试」——**记录还留着**，重试不用重新找堆栈。 */
     private fun showCrashResultDialog(title: String, message: String, retry: CrashStore.Record?) {
         val buttons = ArrayList<Pair<String, () -> Unit>>(2)
         if (retry != null) {
             buttons += "重试" to {
                 closeAppDialog()
-                // 重试先回到"崩溃窗口"再点反馈：Token 可能正是刚刚填好的
-                reportCrashToGithub(retry)
+                reportCrash(retry)
             }
         }
         buttons += "关闭" to { crashDialogOpen = false; closeAppDialog() }
         crashDialogOpen = false
         showAppDialog(AppDialog.buildMessage(this, title, message, buttons))
-    }
-
-    /** 没配 Token 时的引导（含申请地址与所需权限）。 */
-    private fun showCrashTokenIntro() {
-        val msg = buildString {
-            append("一键反馈需要先填一次 GitHub Token（只需一次，之后一直有效）。\n\n")
-            append("1) 手机或电脑打开：\n").append(CrashReporter.TOKEN_HELP_URL).append('\n')
-            append("2) 选 Fine-grained token，Repository access 只勾 nid12345/MyTV4.4\n")
-            append("3) 权限里把 Issues 设为 Read and write，生成后复制\n")
-            append("4) 回到电视：设置 → 关于 → 崩溃反馈设置，粘贴进去\n")
-            append("   （电视上打字麻烦，那里可以用「手机扫码填写」把 Token 从手机贴过来）\n\n")
-            append("Token 只存在本机、只发往 api.github.com，不会随安装包分发。")
-        }
-        crashDialogOpen = false
-        showAppDialog(
-            AppDialog.buildMessage(
-                this, "先配置 GitHub Token", msg,
-                listOf(
-                    "去填写" to { closeAppDialog(); showCrashTokenInput() },
-                    "关闭" to { closeAppDialog() },
-                ),
-            )
-        )
-    }
-
-    /** Token 录入框（复用 v1.14 的「手机扫码填写」——Token 又长又难敲）。 */
-    private fun showCrashTokenInput() {
-        showAppDialog(
-            AppDialog.buildSingleInput(
-                this,
-                "GitHub Token（崩溃反馈用）",
-                "粘贴 fine-grained PAT（Issues: Read and write）",
-                initial = Prefs.githubToken(this),
-                qrPush = AppDialog.QrPush(
-                    specs = listOf(
-                        AppDialog.QrPush.FieldSpec(
-                            "value", "GitHub Token", "粘贴 fine-grained PAT", 0
-                        )
-                    ),
-                    onReceive = { UiLog.i("崩溃", "扫码推送 → Token（${it["value"]?.length ?: 0} 字符）") },
-                ),
-                onCancel = { closeAppDialog() },
-                onOk = { value ->
-                    Prefs.setGithubToken(this, value)
-                    closeAppDialog()
-                    val ok = value.isNotBlank()
-                    showBottomStatus(if (ok) "Token 已保存，再点一次「反馈到 GitHub」即可" else "已清空 Token")
-                    UiLog.i("崩溃", "Token ${if (ok) "已保存（${value.length} 字符）" else "已清空"}")
-                },
-            )
-        )
     }
 
     /**
@@ -1216,12 +1208,6 @@ class MainActivity : AppCompatActivity() {
             return
         }
         showCrashDialog(rec)
-    }
-
-    /** 设置页「关于 → 崩溃反馈设置」入口（同样是"关掉后焦点回原行"的约定）。 */
-    private fun openFeedbackSettingFromSettings() {
-        if (::settings.isInitialized && settings.isOpen) settings.rememberFocus()
-        showCrashTokenInput()
     }
 
     /**
@@ -1952,20 +1938,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * v1.16 需求 2（用户原话）：
-     *   「左侧菜单的按键逻辑优化下，比如说收藏里的二级菜单节目按到最后一个了，
-     *     再按下键直接顺延到下一个分组的二级菜单里去选，同理按上也能顺延到上一个分组
-     *     的二级菜单里去选」。
+     * 左侧面板"二级菜单"（中栏）上下键到边界时**跨组顺延**。
      *
-     * 触发条件（全部满足才算）：
-     *   ① 面板在屏；
-     *   ② 焦点落在**中栏**（二级菜单）的某一行上（`getChildAdapterPosition` 能给出下标）；
-     *   ③ 该行已经是列表的**最后一行**（按下键时）或**第一行**（按上键时）。
+     * v1.16 首次实现（用户需求），v1.18 按用户新需求补齐了四条边界规则：
      *
-     * 命中后：切到相邻导航项 → 中栏换成新内容 → 焦点落到新列表的**首项**（向下顺延）
-     * 或**末项**（向上顺延）。方向不同、落点也不同，这样"顺着按下去"是连续的。
+     *   触发条件（全部满足才算）：
+     *     ① 面板在屏；
+     *     ② 焦点落在**中栏**某一行上；
+     *     ③ 该行已经是列表的**最后一行**（按下键）/ **第一行**（按上键）；
+     *     ④ 当前导航项**参与跨组**（我的收藏 + 各频道分组；换源/系统应用不参与）。
      *
-     * 到头的处理：navIdx 已经在两端时不消费，原样交回系统（等价于"没有更多了"）。
+     *   命中后朝相邻方向找第一个「参与跨组 **且** 有内容」的项（空分组、空收藏自动跳过），
+     *   切过去并把焦点落到新列表的首项（向下）/ 末项（向上）。
+     *
+     *   到达真正的边界（第一个分组首项按上、最后一个分组末项按下）时**不消费**按键，
+     *   焦点原地不动 —— 用户原话：「第一个分组第一项按上不跳；最后一个分组最后一项按下不跳」。
+     *
+     * ⚠️ 判据全部基于 `navEntries` 的 **label**（不是序号）：换订阅源后导航项会整体重建，
+     * 序号会漂移，label 不会 —— 需求 7 要的就是"换任意订阅源后这些规则立刻有效"。
      *
      * @return true = 已消费
      */
@@ -1982,8 +1972,15 @@ class MainActivity : AppCompatActivity() {
         if (count <= 0) return false
         val atEdge = if (down) idx == count - 1 else idx == 0
         if (!atEdge) return false
-        val next = navIdx + (if (down) 1 else -1)
-        if (next !in navEntries.indices) return false
+        // v1.18 需求 6：「换源」「系统应用」不参与跨组 —— 焦点停在这两项的列表里时，
+        // 上下键到边界就该"没有更多了"，不许顺延到相邻分组去。
+        if (!isCrossGroupEntry(navIdx)) return false
+        // v1.18 需求 2/3/5：往相邻方向找"参与跨组且**有内容**"的那一项。
+        // 空分组、空收藏、以及不参与跨组的换源/系统应用，全部跳过。
+        val next = nextCrossGroupEntry(navIdx, down)
+        // v1.18 需求 4：到了真正的边界（第一个分组首项按上 / 最后一个分组末项按下）→
+        // 不消费这个按键，焦点原地不动。
+            ?: return false
         UiLog.i(
             "界面",
             "二级菜单${if (down) "到底" else "到顶"}（第 ${idx + 1}/$count 项）→ " +
@@ -1996,6 +1993,60 @@ class MainActivity : AppCompatActivity() {
         navColumn.select(next)
         onNavSelected(next)
         return true
+    }
+
+    /**
+     * v1.18 需求 1/6：这一项**参不参与**二级菜单的跨组顺延。
+     *
+     * 用户原话：「所有直播源分组（我的收藏、HK香港、央视频、卫视频等）的二级菜单，
+     * 上下键跨组逻辑必须完全一致」「"换源"和"系统应用"这两个按钮不参与跨组」。
+     *
+     * 所以参与集合 = **我的收藏 + 所有频道分组**；换源、系统应用排除在外。
+     * 判据用 `label` 而不是序号，是因为分组数量随订阅源变（需求 7：换源后立即生效）——
+     * 序号会随重建漂移，label 不会。
+     */
+    private fun isCrossGroupEntry(i: Int): Boolean {
+        val e = navEntries.getOrNull(i) ?: return false
+        return when (e.label) {
+            NAV_SWITCH_SOURCE, NAV_APPS -> false
+            NAV_FAVORITE -> true
+            else -> e.group != null
+        }
+    }
+
+    /**
+     * v1.18 需求 5：这一项的二级菜单**有没有内容**（空分组 / 空收藏要自动跳过）。
+     *
+     * 判据必须和真正渲染出来的行数一致，否则会出现"跳过去之后中栏是空的、焦点无处可落"：
+     *   · 频道分组 → [ChannelGroup.channels]（[renderChannels] 就是逐条渲染它）
+     *   · 我的收藏 → 收藏**快照**数量（空的时候中栏只有一行"还没有收藏"的占位文字，
+     *     不该被当成"有内容"跳进去）
+     *   · 换源 / 系统应用 → 各自列表；它们本来就不参与跨组，这里只为语义完整
+     */
+    private fun entryHasRows(i: Int): Boolean {
+        val e = navEntries.getOrNull(i) ?: return false
+        return when (e.label) {
+            NAV_FAVORITE -> Prefs.iptvChannelFavoriteItems(this).isNotEmpty()
+            NAV_SWITCH_SOURCE -> Prefs.sources(this).isNotEmpty()
+            NAV_APPS -> true
+            else -> e.group?.channels?.isNotEmpty() == true
+        }
+    }
+
+    /**
+     * 从 [from] 出发、朝 [down] 方向找最近的"参与跨组且非空"的项；找不到返回 null。
+     *
+     * 用**循环**而不是只查相邻一项，是为了满足需求 5：中间夹着空分组（或夹着不参与跨组的
+     * 换源/系统应用）时要能一路跳过去，而不是停在第一个候选上什么也不做。
+     */
+    private fun nextCrossGroupEntry(from: Int, down: Boolean): Int? {
+        val step = if (down) 1 else -1
+        var i = from + step
+        while (i in navEntries.indices) {
+            if (isCrossGroupEntry(i) && entryHasRows(i)) return i
+            i += step
+        }
+        return null
     }
 
     /**
@@ -2452,17 +2503,22 @@ class MainActivity : AppCompatActivity() {
                 if (e1 == null) return false
 
                 // ------------------------------------------------------------------
-                // v1.14 需求 2：左右 1/4 区域内的竖向滑动 = 调亮度 / 调音量。
+                // v1.14 需求 2：左右边缘区域内的竖向滑动 = 调亮度 / 调音量。
+                // v1.18 需求 3/4/5：热区收窄成 1/6、且**只在完全没有弹层时才触发**；
+                //                   判定宽度取根视图宽度（与触点同坐标系）。
                 //
                 // 注意这里的 `dy` 是**本次事件的增量**（不是累计值），
                 // 所以调节是连续的：手指一直滑，值就一直跟着变。
                 // 这与下面的换台判定刚好相反 —— 换台走的是"累计位移到阈值只认一次"。
                 // ------------------------------------------------------------------
                 if (edgeZone == null && !swipeConsumed) {
-                    val zone = edgeZoneOf(e1.x)
                     val ay = Math.abs(e2.y - e1.y)
                     val ax = Math.abs(e2.x - e1.x)
-                    if (zone != null && ay >= EDGE_MIN_PX && ay > ax) edgeZone = zone
+                    // 先确认是"够长的竖向滑动"，再去问"现在允许不允许触发" ——
+                    // 后者要遍历覆盖层栈，放在这里可以避免每一次 onScroll 都白算一遍。
+                    if (ay >= EDGE_MIN_PX && ay > ax && edgeAdjustAllowed()) {
+                        edgeZone = edgeZoneOf(e1.x, touchWidth())
+                    }
                 }
                 val zone = edgeZone
                 if (zone != null) {
@@ -2908,9 +2964,10 @@ class MainActivity : AppCompatActivity() {
                     Snackbar.show("已恢复初始化，重启后生效", this@MainActivity)
                 }
                 onSettingChanged = { applySettingsChanged() }
-                // v1.17：崩溃记录的查看 / 反馈入口（关于分类）
+                // v1.17：崩溃记录的查看 / 一键反馈入口（关于分类）
+                // v1.18：原来的「崩溃反馈设置（GitHub Token）」入口已删除 —— 换成
+                //        腾讯 Bugly 后不需要用户在电视上配置任何东西（App ID 只在代码里一处）
                 onCrashRecord = { openCrashRecordFromSettings() }
-                onFeedbackSetting = { openFeedbackSettingFromSettings() }
             }
             root.addView(settings, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))

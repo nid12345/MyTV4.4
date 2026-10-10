@@ -27,26 +27,24 @@ object SettingsCats {
     fun about(
         ctx: Context,
         onCrashRecord: () -> Unit = {},
-        onFeedbackSetting: () -> Unit = {},
     ): List<SettingsItemView> {
         val ver = runCatching {
             ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
         }.getOrDefault("unknown")
         // ---------------------------------------------------------------------------
-        // v1.17：崩溃记录入口 + 崩溃反馈设置。
+        // v1.17：崩溃记录入口。
         //
-        // 为什么要在这里放：崩溃记录窗口现在**只在启动时弹一次**（看过之后不再挡屏），
+        // 为什么要在这里放：崩溃记录窗口**只在启动时弹一次**（看过之后不再挡屏），
         // 用户想事后查看 / 补一次反馈，就得有个随时能进的入口。
-        // 「关于」是最自然的归属（本来就是"应用自身信息"这一类），也不必再占一个左栏分类。
+        //
+        // v1.18：旁边那个「崩溃反馈设置（GitHub Token）」入口**已删除** ——
+        // 上报改成腾讯 Bugly 之后，用户在电视上不需要配置任何东西（App ID 只填在代码里一处）。
+        // 所以这里只剩一个"看记录 / 一键反馈"的入口。
         // ---------------------------------------------------------------------------
         val hasCrash = top.yogiczy.mytv.legacy.data.CrashStore.read(ctx) != null
-        val crash = row(ctx, "崩溃记录", "查看上次的崩溃堆栈，并一键反馈到 GitHub")
+        val crash = row(ctx, "崩溃记录", "查看上次崩溃堆栈，并一键上报（腾讯 Bugly）")
         crash.setValue(if (hasCrash) "有" else "无")
         crash.onClick = onCrashRecord
-        val token = top.yogiczy.mytv.legacy.data.Prefs.githubToken(ctx)
-        val feedback = row(ctx, "崩溃反馈设置", "填写 GitHub Token（只需一次，支持手机扫码粘贴）")
-        feedback.setValue(if (token.isBlank()) "未配置" else "已配置")
-        feedback.onClick = onFeedbackSetting
         return listOf(
             row(ctx, "应用名称", null).apply { setValue("MyTV-Legacy") },
             row(ctx, "应用版本", null).apply { setValue("$ver (API 19)") },
@@ -54,7 +52,6 @@ object SettingsCats {
                 onClick = { }
             },
             crash,
-            feedback,
         )
     }
 
