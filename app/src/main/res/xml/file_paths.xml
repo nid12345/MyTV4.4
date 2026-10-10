@@ -1,9 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   FileProvider 可共享的路径（v1.6 应用升级通道）。
-  只开放「应用专属外部目录下的 update/」——下载的安装包放在那里，
+  只开放「应用专属目录下的 update/」——下载的安装包放在那里，
   既不需要任何存储权限，也不会把用户其它目录暴露出去。
+
+  v1.8：老机顶盒经常没有可用的外部存储（`getExternalFilesDir(null)` 返回 null），
+  下载目录会回落到**内部私有目录** `filesDir/update/`。这里必须同时开放
+  `files-path`，否则 Android 7+ 上 `FileProvider.getUriForFile()` 会抛
+  IllegalArgumentException，安装包下好了却拉不起安装器。
 -->
 <paths>
     <external-files-path name="update" path="update/" />
+    <files-path name="update_internal" path="update/" />
 </paths>

@@ -105,8 +105,8 @@ cp keystore.properties.example keystore.properties
      "versionCode": 13,
      "versionName": "1.8-legacy.13",
      "url": "https://github.com/nid12345/MyTV4.4/releases/download/v1.8/MyTV4.4-v1.8-legacy13.apk",
-     "size": 10299736,
-     "md5": "（安装包的 MD5）",
+     "size": 10309498,
+     "md5": "71c8e01bad24c1e13a9eb53f5464977f",
      "notes": "更新说明，可多行"
    }
    ```

@@ -117,7 +117,17 @@ object UpdateRepository {
         line: String,
         onProgress: (Float) -> Boolean,
     ): Pair<File?, String?> {
-        val dir = File(ctx.getExternalFilesDir(null), "update").apply { mkdirs() }
+        // v1.8 修复（真机/模拟器实测）：老机顶盒经常没有可用的外部存储，
+        // `getExternalFilesDir(null)` 返回 null，于是 `File(null, "update")` 退化成**相对路径**
+        // `update`，最终解析成 `/update` —— mkdirs 必然失败，下载直接
+        // `open failed: ENOENT (/update/MyTV4.4-x.apk.part)`。
+        // 这会让「检查更新」能弹框、点「立即更新」却永远下载失败（用户反馈的"点了没反应"）。
+        // 现在：外部目录拿不到就落内部私有目录，并且把建目录失败当错误直接报出来。
+        val base = ctx.getExternalFilesDir(null) ?: ctx.filesDir
+        val dir = File(base, "update")
+        if (!dir.exists() && !dir.mkdirs() && !dir.exists()) {
+            return null to "无法创建下载目录：${dir.absolutePath}"
+        }
         val target = File(dir, "MyTV4.4-${info.versionName}.apk")
         // 已经下好且校验通过就直接复用，避免重复下载
         if (target.exists() && target.length() > 0 && matchesMd5(target, info.md5)) {

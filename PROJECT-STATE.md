@@ -1320,3 +1320,67 @@ SHA-256 `02e143e8…f7c2`，可直接覆盖安装）+ `dist/MyTV-Legacy-v1.2-deb
 - 软解复位（问题 0 根因 1）在模拟器上无法自然触发 `DECODER_INIT_FAILED`（只有 DECODING_FAILED），
   逻辑经审查，效果待真机日志（看「换频道：软解已复位」）。
 - 卡顿改善幅度取决于源画质与盒子硬解能力：1080p High Profile 流在老盒子上任何播放器都只能软解。
+
+---
+
+## 2026-10-10 · v1.8（versionCode 13，tag `v1.8`）
+
+用户 7 项需求 + 2 个顺带修掉的真实缺陷。
+
+### 需求与落地
+1. **更新链路无进度提示** → 新增 `ui/UpdateProgressView.kt`：进度条 + 百分比 + 已下载/总大小
+   +「取消」；下完变「安装」。`downloadUpdate()` 从"只写底栏一行字"改为弹该层。
+2. **设置页四角圆角** → `SettingsView` 背景由 `UiKit.rounded(...)` 改全屏 `Palette.background`。
+3. **左右滑线路循环** → `changeLineBy()`：右滑下一条、最末一条后回第一条；左滑相反。
+4. **更新通道三个合一 + 弹窗划不动** → `UpdateRepository` 固定走 `LINE_AUTO`
+   （raw → ghfast.top → gh-proxy.com → jsDelivr 依次回退）；删设置页「更新通道 / 下载线路」；
+   `AppDialog.buildMessage` 正文改成 `ScrollView`（实测 dump 里确认是 ScrollView 节点）。
+5. **设置入口整理** → 删 `SettingsCategories.UPDATE("更新")` / `MORE("推送")` / `EPG_RESERVE("预约")`；
+   「更新」入口并入「应用」；新建 `res/values/ids.xml`（`EpgSourceView` 引用了 `R.id` 但没定义）。
+   「界面 / 播放器 / 网络 / 收藏」的开关全部接上真实消费点
+   （台标、时间显示、超时自动关闭、界面缩放、渲染方式、音频软解、停止上一项、跳过帧、
+   网络重试、直播源缓存时间、升级提醒）。`UiTimeShowMode` 补中文 label（隐藏/常显/整点显隐/半点显隐）。
+6. **节目单照 1.7 原版重做** → 新增 `ui/epg/EpgSourceView.kt`（节目表管理列表）：
+   内置 3 个（老张的 EPG / 112114 / Fanmingming）+ `+ 添加自定义节目单`，可切换、长按/删除键移除。
+   修掉一处缺陷：回退来源此前只取「自定义」列表、**漏掉内置源**，导致内置源失效时不会自动回退。
+7. **推 GitHub** → commit + Release `v1.8`（两个 APK）。
+
+### 顺带修掉的两个真实缺陷
+- **《使用须知》默认焦点错**（老盒子遥控器按确认无反应）：
+  `AgreementView` 根节点 `isFocusable=true`，而 ViewGroup 默认
+  `descendantFocusability=FOCUS_BEFORE_DESCENDANTS` → 子按钮**永远拿不到焦点**。
+  修法：四处覆盖层（`AgreementView` / `AppDialog` / `UpdateProgressView` / `EpgSourceView`）
+  统一改 `FOCUS_AFTER_DESCENDANTS`。实测：改前 dump 显示焦点在根覆盖层，改后焦点落在
+  「已阅读并同意」，一次确认键即通过。
+- **更新下载必然失败**（用户"点了更新没反应"的真正原因）：
+  `getExternalFilesDir(null)` 在老机器上返回 **null** → `File(null, "update")` 退化成相对路径
+  → 解析成 `/update` → `open failed: ENOENT (/update/MyTV4.4-1.8-legacy.13.apk.part)`。
+  修法：回落 `ctx.filesDir`，建目录失败直接当错误抛；
+  同步在 `res/xml/file_paths.xml` 增加 `<files-path name="update_internal" path="update/">`，
+  否则 Android 7+ `FileProvider.getUriForFile()` 会抛 IllegalArgumentException。
+
+### 实测（emulator-5554，API 19）
+- 快捷菜单 7 项齐全；设置页分类：关于/应用/直播源/节目单/界面/收藏/播放器/网络/调试/日志。
+  对照 v1.7 APK（同为 API 19 模拟器）：v1.7 有独立「更新」分类，内含
+  「检查更新 / 升级提醒 / 更新强提醒 / 更新通道 stable / 下载线路 auto」→ v1.8 已按要求移除。
+- 「自定义节目单」打开节目表管理列表，3 个内置节目表 + 添加自定义。
+- 更新链路：raw TLS 失败 → ghfast.top → gh-proxy.com → jsDelivr 自动回退；降版本调试包实测
+  弹出「发现新版本 → 当前 1.7-legacy.12 / 最新 1.8-legacy.13」→「立即更新」→「正在下载更新」层，
+  失败时把每条线路的原因列出来（不再"点了没反应"）。
+- 远端 APK 下载校验 MD5 与 `update/version.json` 一致。
+
+### 模拟器环境坑（本轮新踩，写下来省得再踩）
+- `uiautomator dump` 会报 `ERROR: could not get idle state.` —— 只要界面在持续刷新
+  （底栏信息块每 500ms 更新）就拿不到快照；**此时 `adb pull` 会把上一次的旧文件当结果**，
+  极易误判（本轮就误判过两次）。对策：唯一文件名 + 校验 dump 命令输出。
+- 模拟器 `screencap` 全黑（GPU 渲染）。
+- 模拟器只通 jsDelivr，raw / ghfast / gh-proxy 全部 TLS `CertPathValidatorException`（本机代理 MITM）。
+- jsDelivr 对 `@main` 有缓存：改完 `update/version.json` 要
+  `curl https://purge.jsdelivr.net/gh/nid12345/MyTV4.4@main/update/version.json`，
+  **一次不一定生效，需再 purge 一次**。
+- 想测「有新版本」提示：临时把 `App.kt` 的 `VERSION_CODE` 降到 12 编调试包（别覆盖 dist），测完改回。
+
+### 产物（v1.8，versionCode 13）
+- `dist/MyTV4.4-v1.8-legacy13.apk`（release 10,309,498 B，MD5 `71c8e01bad24c1e13a9eb53f5464977f`）
+- `dist/MyTV4.4-v1.8-legacy13-debug.apk`（debug 17,051,045 B，MD5 `c9c4db2a569712cd078a13d76e5fdd45`）
+- `update/version.json` → v1.8 清单
