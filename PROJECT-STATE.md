@@ -2173,5 +2173,9 @@ v1.13 的"所有"字面上包含面板 → **回问后用户裁决：包含面�
 - `dist/MyTV4.4-v1.14-legacy19.apk`（release **10,365,796 B**，MD5 `ebd330cd54949259f63508a4bd6cce00`，已签名，
   证书 SHA-256 `02e143e8…` 与 v1.7 起一致）
 - `dist/MyTV4.4-v1.14-legacy19-debug.apk`（debug **12,944,138 B**，MD5 `d35fcea59ef31ea9ad9dc22e32e255f9`）
-- `update/version.json` → v1.14 清单
+- `update/version.json` → v1.14 清单（blob sha `e693be4`）
 - 交付报告：`dist/v1.14-报告.md`
+- 已发布：Release `v1.14`（id 412864126）→ `https://github.com/nid12345/MyTV4.4/releases/tag/v1.14`
+  （两个 APK 均 `uploaded`）；源码 commit **`db2d13c`**（5 新增 + 10 修改）；
+  线上回验：清单 versionCode 19 / size 10365796… 与本地产物一致，从 Release 下载的 APK
+  `cmp` 逐字节相同、badging 与证书 `02e143e8…` 一致
