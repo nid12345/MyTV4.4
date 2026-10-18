@@ -41,8 +41,26 @@ object DlnaDiscovery {
     /** 单次接收的超时时间（毫秒）。 */
     private const val RECEIVE_TIMEOUT_MS = 400
 
-    /** 搜索目标：只搜媒体渲染器（具备播放能力的设备）。 */
+    /**
+     * 搜索目标（v1.21 重写 —— 这是"搜不到小米电视"的根因所在）。
+     *
+     * 旧实现**只发 MediaRenderer:1/2/3**。局域网实测（2026-10-18，同一网段）：
+     *   `ssdp:all`        → 1 台：客厅的小米电视
+     *   `upnp:rootdevice` → 1 台：客厅的小米电视
+     *   `MediaRenderer:1/2/3`、`AVTransport:1` → **0 台**
+     * 那台电视的描述里写的是：
+     *   deviceType = `urn:schemas-upnp-org:device:MiMediaRenderer:0.5`
+     *   serviceType = `urn:schemas-upnp-org:service:MiAVTransport:0.5`
+     * —— 小米用的是**私有设备类型**，对标准 `MediaRenderer:N` 的搜索**根本不回应**
+     * （抖音等 App 的投屏 SDK 发的是 `ssdp:all`，所以它们搜得到）。
+     *
+     * 因此：`ssdp:all` 与 `upnp:rootdevice` **必须发**，标准 MediaRenderer 保留
+     * （响应更快、报文更省）。设备"是不是渲染器"不再靠搜索目标判断，
+     * 而是拉回描述 XML 后看有没有 AVTransport 服务 —— 见 [parseDeviceDescription]。
+     */
     private val SEARCH_TARGETS = listOf(
+        "ssdp:all",
+        "upnp:rootdevice",
         "urn:schemas-upnp-org:device:MediaRenderer:1",
         "urn:schemas-upnp-org:device:MediaRenderer:2",
         "urn:schemas-upnp-org:device:MediaRenderer:3",
@@ -56,23 +74,53 @@ object DlnaDiscovery {
      */
     fun discover(
         context: Context?,
-        timeoutMs: Long = 6000L,
+        timeoutMs: Long = 8000L,
         onDeviceFound: (DlnaDevice) -> Unit = {},
     ): List<DlnaDevice> {
         val multicastLock = acquireMulticastLock(context)
-        val socket = createSocket()
-        if (socket == null) {
-            runCatching { multicastLock?.release() }
-            return emptyList()
-        }
+
+        // v1.21：逐个网卡搜。旧实现只挑一张网卡，电视盒子同时插着网线又连着 WiFi 时，
+        // 挑中的那张往往不是当前上网的那张 —— 多播发出去没有回应，表现为"搜不到"。
+        val interfaces = candidateInterfaces()
+        val targets = if (interfaces.isEmpty()) listOf(null) else interfaces
+        val perInterface = (timeoutMs / targets.size).coerceAtLeast(2500L)
 
         val locations = LinkedHashMap<String, String>()
+        try {
+            targets.forEach { intf ->
+                searchOnInterface(intf, perInterface, locations)
+                // 已经搜到设备就不必再遍历其余网卡，省时间
+                if (locations.isNotEmpty()) return@forEach
+            }
+        } finally {
+            runCatching { multicastLock?.release() }
+        }
+
+        val devices = ArrayList<DlnaDevice>()
+        locations.values.distinct().forEach { location ->
+            fetchDevice(location)?.let { device ->
+                onDeviceFound(device)
+                devices.add(device)
+            }
+        }
+
+        Log.i(TAG, "发现 ${devices.size} 台投屏设备（候选 LOCATION ${locations.size} 个）")
+        return devices.sortedBy { it.displayName }
+    }
+
+    /** 在**一张**网卡上做完整的「发搜索 + 收响应」。 */
+    private fun searchOnInterface(
+        intf: NetworkInterface?,
+        durationMs: Long,
+        out: LinkedHashMap<String, String>,
+    ) {
+        val socket = createSocket(intf) ?: return
         try {
             val buffer = ByteArray(8192)
             val startedAt = System.currentTimeMillis()
             var lastSentAt = 0L
 
-            while (System.currentTimeMillis() - startedAt < timeoutMs) {
+            while (System.currentTimeMillis() - startedAt < durationMs) {
                 val now = System.currentTimeMillis()
                 if (now - lastSentAt >= SEARCH_INTERVAL_MS) {
                     SEARCH_TARGETS.forEach { sendSearch(socket, it) }
@@ -87,8 +135,8 @@ object DlnaDiscovery {
                         ?.substringBefore("::")
                         ?.ifBlank { null }
                         ?: location
-                    if (locations.put(key, location) == null) {
-                        Log.i(TAG, "收到设备响应: $location")
+                    if (out.put(key, location) == null) {
+                        Log.i(TAG, "收到设备响应${intf?.let { "（${it.name}）" } ?: ""}: $location")
                     }
                 } catch (_: SocketTimeoutException) {
                     // 本轮未收到报文，继续等待直到总超时
@@ -98,27 +146,15 @@ object DlnaDiscovery {
             }
         } finally {
             runCatching { socket.close() }
-            runCatching { multicastLock?.release() }
         }
-
-        val devices = ArrayList<DlnaDevice>()
-        locations.values.distinct().forEach { location ->
-            fetchDevice(location)?.let { device ->
-                onDeviceFound(device)
-                devices.add(device)
-            }
-        }
-
-        Log.i(TAG, "发现 ${devices.size} 台投屏设备")
-        return devices.sortedBy { it.displayName }
     }
 
-    private fun createSocket(): MulticastSocket? = try {
+    private fun createSocket(intf: NetworkInterface?): MulticastSocket? = try {
         MulticastSocket().apply {
             reuseAddress = true
             soTimeout = RECEIVE_TIMEOUT_MS
             timeToLive = 4
-            pickNetworkInterface()?.let { runCatching { networkInterface = it } }
+            intf?.let { runCatching { networkInterface = it } }
         }
     } catch (ex: Exception) {
         Log.e(TAG, "创建多播套接字失败: ${ex.message}")
@@ -126,17 +162,19 @@ object DlnaDiscovery {
     }
 
     /**
-     * 选择多播发送使用的网络接口。
+     * 逐个尝试的多播网卡（wlan → eth → en → 其它 IPv4）。
      *
      * 设备同时在蜂窝网络与 WiFi 时，必须显式选局域网接口，否则多播发不出去。
-     * （原版同样优先 wlan → eth → en → 任意；顺序逐条保留。）
+     * 排除回环、未启用、不支持多播、无 IPv4 地址、以及 VPN 虚拟网卡（tun/ppp）。
      */
-    private fun pickNetworkInterface(): NetworkInterface? {
+    private fun candidateInterfaces(): List<NetworkInterface> {
         val enumeration = runCatching { NetworkInterface.getNetworkInterfaces() }.getOrNull()
-            ?: return null
+            ?: return emptyList()
         val candidates = ArrayList<NetworkInterface>()
         while (enumeration.hasMoreElements()) {
             val intf = enumeration.nextElement()
+            val name = intf.name ?: continue
+            if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("utun")) continue
             val hasIpv4 = runCatching {
                 intf.interfaceAddresses.any { it.address is Inet4Address }
             }.getOrDefault(false)
@@ -144,10 +182,13 @@ object DlnaDiscovery {
                 candidates += intf
             }
         }
-        return candidates.firstOrNull { it.name.startsWith("wlan") }
-            ?: candidates.firstOrNull { it.name.startsWith("eth") }
-            ?: candidates.firstOrNull { it.name.startsWith("en") }
-            ?: candidates.firstOrNull()
+        val ordered = listOfNotNull(
+            candidates.firstOrNull { it.name.startsWith("wlan") },
+            candidates.firstOrNull { it.name.startsWith("eth") },
+            candidates.firstOrNull { it.name.startsWith("en") },
+        ).distinct()
+        // 最多试 3 张，避免每张都等满超时
+        return (ordered + candidates).distinct().take(3)
     }
 
     /**
@@ -177,7 +218,9 @@ object DlnaDiscovery {
             append("M-SEARCH * HTTP/1.1\r\n")
             append("HOST: $SSDP_HOST:$SSDP_PORT\r\n")
             append("MAN: \"ssdp:discover\"\r\n")
-            append("MX: 2\r\n")
+            // v1.21：MX 2 → 3。设备被要求在 0~MX 秒内随机延迟后回应，MX 太小会让
+            // 响应慢的设备（小米电视实测要 1 秒以上）直接错过窗口。
+            append("MX: 3\r\n")
             append("ST: $searchTarget\r\n")
             append("USER-AGENT: Android/1.0 UPnP/1.1 MyTV/1.0\r\n")
             append("\r\n")
@@ -244,8 +287,13 @@ object DlnaDiscovery {
             return null
         }
 
-        // 没有 AVTransport 服务说明设备不支持被推送播放（例如只提供 ContentDirectory 的 NAS）
-        if (avTransportControlUrl.isBlank()) return null
+        // 没有 AVTransport 服务说明设备不支持被推送播放（例如只提供 ContentDirectory 的 NAS）。
+        // ⚠️ 判据用 `contains("AVTransport")` 而不是等于标准 URN —— 小米电视/盒子报的是
+        //    `urn:schemas-upnp-org:service:MiAVTransport:0.5`，写死标准 URN 会把它误杀。
+        if (avTransportControlUrl.isBlank()) {
+            Log.i(TAG, "设备无 AVTransport 服务，跳过：$location（$friendlyName / $modelName）")
+            return null
+        }
 
         return DlnaDevice(
             friendlyName = friendlyName,

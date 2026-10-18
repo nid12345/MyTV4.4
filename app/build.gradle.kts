@@ -37,8 +37,8 @@ android {
         // ⚠️ 与 App.kt 的 BuildConfigCompat 必须一致：
         //     versionCode ↔ VERSION_CODE（升级通道用它比大小）
         //     versionName ↔ VERSION_NAME
-        versionCode = 25
-        versionName = "1.20-legacy.25"
+        versionCode = 26
+        versionName = "1.21-legacy.26"
         vectorDrawables { useSupportLibrary = true }
         // minSdk < 21 时 core library desugaring 强制要求 multidex
         multiDexEnabled = true
@@ -98,6 +98,14 @@ android {
     packaging {
         resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     }
+
+    // v1.21：新增 JVM 单元测试（验证 EPG 匹配索引与旧线性扫描**结果等价**且不再 O(N×M)）。
+    // 只跑纯 Kotlin 逻辑（不引 Robolectric），因此需要 returnDefaultValues 让
+    // android.util.Log / SystemClock 这类"未 mock 的 android.jar 方法"返回默认值而不是抛异常。
+    @Suppress("UnstableApiUsage")
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -132,4 +140,7 @@ dependencies {
     // 现在上报走 net/Http.postRaw（HTTPS POST text/plain + 共享密钥头），
     // 服务端是工程根目录 mytv-bug-report/ 下的 Cloudflare Worker（D1 存储 + Basic Auth 后台）。
     // **本文件不再新增任何崩溃上报依赖。**
+
+    // v1.21：仅用于 JVM 单元测试（不参与 APK 打包）
+    testImplementation("junit:junit:4.13.2")
 }

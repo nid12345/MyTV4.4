@@ -50,6 +50,8 @@ import top.yogiczy.mytv.legacy.data.EpgProgramme.Companion.isLive
 import top.yogiczy.mytv.legacy.data.EpgProgramme.Companion.progress
 import top.yogiczy.mytv.legacy.data.EpgProgramme.Companion.remainingMinutes
 import top.yogiczy.mytv.legacy.data.EpgList.Companion.match
+import top.yogiczy.mytv.legacy.data.EpgList.Companion.warmUp
+import top.yogiczy.mytv.legacy.data.Epg.Companion.nowProgramme
 import top.yogiczy.mytv.legacy.data.ChannelParser
 import top.yogiczy.mytv.legacy.data.CrashReporter
 import top.yogiczy.mytv.legacy.data.CrashStore
@@ -1655,6 +1657,8 @@ class MainActivity : AppCompatActivity() {
                 val list = EpgRepository(cacheDir, current, fallbacks)
                     .getEpgList(names, Prefs.epgRefreshTimeThreshold(this))
                 epgList = list
+                // v1.21：索引在这里（后台线程）建好，别让第一次匹配把它算在主线程头上
+                list.warmUp()
                 val programmes = list.value.sumOf { it.programmeList.value.size }
                 // ★ 原版文案，逐字沿用（PROJECT-STATE 冻结决策）：无 adb 时按 tag「节目单」筛
                 UiLog.i("节目单", "解析节目单完成，共${list.value.size}个频道，${programmes}个节目")
@@ -1804,7 +1808,8 @@ class MainActivity : AppCompatActivity() {
         val map = HashMap<String, Pair<String?, Float>>()
         val list = epgList ?: return map
         channels.forEach { c ->
-            val p = list.match(c)?.programmeList?.value?.firstOrNull { it.isLive() } ?: return@forEach
+            // v1.21：`match` 已改成哈希查表；取"正在播"改用二分（原为逐条 `isLive()` 线性扫）
+            val p = list.match(c)?.nowProgramme() ?: return@forEach
             map[c.name] = p.title to p.progress()
         }
         return map
@@ -5359,6 +5364,11 @@ class MainActivity : AppCompatActivity() {
         renderEpgTip()
         val items = Prefs.iptvChannelFavoriteItems(this)
         val all = groupList.flatChannels()
+        // v1.21：先建一次「频道名 → 频道」索引。原来的写法对每个收藏都要
+        // `all.firstOrNull { }` + `all.any { }` 全表扫一遍（O(收藏数 × 频道数)），
+        // 收藏一多就是几百万次字符串比较，同样会卡住主线程。
+        val byName = HashMap<String, Channel>(all.size * 2)
+        all.forEach { ch -> if (!byName.containsKey(ch.name)) byName[ch.name] = ch }
 
         val rows = ArrayList<ChannelColumnView.Row>()
         if (items.isEmpty()) {
@@ -5368,7 +5378,8 @@ class MainActivity : AppCompatActivity() {
             items.forEach { fav ->
                 // ① 当前订阅源里有同名频道 → 用当前源的（线路最新）
                 // ② 没有 → 用收藏快照（跨源保留）
-                val ch = all.firstOrNull { it.name == fav.name } ?: fav.toChannelOrNull()
+                val hit = byName.containsKey(fav.name)
+                val ch = byName[fav.name] ?: fav.toChannelOrNull()
                 if (ch == null) {
                     rows.add(ChannelColumnView.Row.TextRow(
                         fav.name, "该收藏没有可用线路（旧版本只存了频道名，重新收藏一次即可）",
@@ -5376,14 +5387,14 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     rows.add(ChannelColumnView.Row.ChannelRow(
                         channel = ch,
-                        badge = if (all.any { it.name == fav.name }) "长按取消收藏" else "来自其它订阅源 · 长按取消收藏",
+                        badge = if (hit) "长按取消收藏" else "来自其它订阅源 · 长按取消收藏",
                         current = (ch.name == currentChannel?.name),
                     ))
                 }
             }
         }
         channelColumn.submit(rows)
-        UiLog.i("界面", "收藏面板：共 ${items.size} 条快照，当前源命中 ${items.count { f -> all.any { it.name == f.name } }} 条")
+        UiLog.i("界面", "收藏面板：共 ${items.size} 条快照，当前源命中 ${items.count { byName.containsKey(it.name) }} 条")
     }
 
     /** 系统应用：装了什么列什么，点击跳转出去。 */

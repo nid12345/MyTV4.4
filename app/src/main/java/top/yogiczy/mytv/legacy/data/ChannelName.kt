@@ -68,10 +68,27 @@ object ChannelName {
     )
 
     /**
+     * 归一化结果的 memo。
+     *
+     * v1.21：一次 [normalize] = 1 次 NFKC + **4 次正则替换**，而它被
+     * `EpgList.match` 按「频道数 × 节目单频道数」的规模调用 —— 真机实测
+     * （MiTV4-ANSM0 / Android 6.0.1）主线程因此**阻塞 11 秒**触发 ANR
+     * （后台指纹 `7531bf224a66cb14`，堆栈末端就是 `Pattern.matcher`）。
+     * 归一化是纯函数（同输入必同输出），缓存它既安全又能把重复调用降到零。
+     */
+    private val normCache = object : LinkedHashMap<String, String>(256, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean =
+            size > 4096
+    }
+
+    private val normLock = Any()
+
+    /**
      * 归一化频道名称
      */
     fun normalize(raw: String): String {
         if (raw.isBlank()) return ""
+        synchronized(normLock) { normCache[raw]?.let { return it } }
 
         var value = Normalizer.normalize(raw, Normalizer.Form.NFKC).lowercase()
 
@@ -88,7 +105,19 @@ object ChannelName {
         value = qualityRegex.replace(value, "")
         value = noiseRegex.replace(value, "")
 
+        synchronized(normLock) { normCache[raw] = value }
         return value
+    }
+
+    /**
+     * 频道核心标识（**输入已经是归一化结果**，不再重复归一化）。
+     *
+     * v1.21：[matches] 与 `EpgList` 的索引都要先归一化再取核心标识，
+     * 早先的写法会在内部再跑一遍 [normalize]（= 4 次正则），白白翻倍。
+     */
+    fun coreKeyOf(normalized: String): String? {
+        if (normalized.isBlank()) return null
+        return cctvCoreRegex.find(normalized)?.value ?: normalized
     }
 
     /**
@@ -97,12 +126,7 @@ object ChannelName {
      * 用于归一化后仍不完全一致的场景，例如「CCTV-5+赛事」与「CCTV5+-体育赛事」
      * 都归属到 cctv5plus。
      */
-    fun coreKey(raw: String): String? {
-        val normalized = normalize(raw)
-        if (normalized.isBlank()) return null
-
-        return cctvCoreRegex.find(normalized)?.value ?: normalized
-    }
+    fun coreKey(raw: String): String? = coreKeyOf(normalize(raw))
 
     /**
      * 判断两个名称是否指同一个频道
@@ -116,8 +140,9 @@ object ChannelName {
 
         // 只有在央视系列上才允许「前缀一致即视为同一频道」，
         // 避免把「浙江卫视」这类名称误并到别的频道
-        val coreLeft = coreKey(left) ?: return false
-        val coreRight = coreKey(right) ?: return false
+        // v1.21：两边都已归一化过，直接用 [coreKeyOf] 即可，别再各跑一遍正则。
+        val coreLeft = coreKeyOf(normalizedLeft) ?: return false
+        val coreRight = coreKeyOf(normalizedRight) ?: return false
 
         return coreLeft.startsWith("cctv") && coreLeft == coreRight
     }

@@ -23,8 +23,14 @@ object DlnaCastRepository {
 
     private const val TAG = "投屏"
 
-    /** 搜索持续时间（原版 `SCAN_TIMEOUT_MS = 6000`）。 */
-    private const val SCAN_TIMEOUT_MS = 6_000L
+    /**
+     * 搜索持续时间。
+     *
+     * v1.21：6s → 8s。原版 6s 是按「只搜标准 MediaRenderer」定的；
+     * v1.21 起要额外搜 `ssdp:all`/`upnp:rootdevice`（小米私有设备类型只在
+     * 这两个目标下回应），响应更杂也更慢，实测 6s 偶尔收不全。
+     */
+    private const val SCAN_TIMEOUT_MS = 8_000L
 
     private val main = Handler(Looper.getMainLooper())
 

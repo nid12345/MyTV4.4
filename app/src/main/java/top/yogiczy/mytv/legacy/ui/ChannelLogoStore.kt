@@ -59,6 +59,16 @@ object ChannelLogoStore {
     /** 内置台标所在目录（assets 下）。 */
     private const val LOGO_ASSET_DIR = "channel_logo"
 
+    /**
+     * 别名索引文件（assets 根下）：`归一化频道名 <TAB> 内置文件名`，每行一条。
+     *
+     * v1.21：内置台标由 932 张精简到 **165 张常见台标**，覆盖率靠这张索引补回来 ——
+     * 索引把 `iptv-api/config/alias.txt` 里的别名、以及各台标的自身写法
+     * 都归一化后登记成键，于是「CCTV1综合」「CCTV-1 综合」「中央一台」都能落到
+     * `CCTV1.png`，不需要把整仓库都塞进 APK。
+     */
+    private const val LOGO_ALIAS_FILE = "logo_alias.txt"
+
     /** 自建台标仓库：公共 CDN 加速地址。 */
     private const val LOGO_SELF_CDN_PREFIX =
         "https://gcore.jsdelivr.net/gh/nid12345/mytv-logos@main/tv/"
@@ -111,6 +121,10 @@ object ChannelLogoStore {
     /** 内置文件名索引：小写文件名（去扩展名）→ 真实文件名。对应 1.7 的 `BuiltinLogoIndex`。 */
     @Volatile
     private var builtinIndex: Map<String, String>? = null
+
+    /** 别名索引：归一化频道名 → 内置文件名（不含扩展名）。见 [LOGO_ALIAS_FILE]。 */
+    @Volatile
+    private var aliasIndex: Map<String, String>? = null
 
     /** 频道名 → 内置文件名 的匹配缓存（v0.3.1 已有，保留）。 */
     private val matchCache = HashMap<String, String?>()
@@ -169,7 +183,34 @@ object ChannelLogoStore {
                 map[fileName.substringBeforeLast('.').lowercase()] = fileName
             }
             builtinIndex = map
-            selfCheckOnce(map)
+            selfCheckOnce(ctx, map)
+            return map
+        }
+    }
+
+    /**
+     * 别名索引（懒加载，只在第一次匹配不到内置文件名时才读）。
+     *
+     * 文件很小（v1.21 为 648 条 / 约 13KB），一次性读进 HashMap 即可；
+     * 读失败（文件缺失 / 编码异常）按"没有别名"降级，不影响主流程。
+     */
+    private fun aliasOf(ctx: Context): Map<String, String> {
+        aliasIndex?.let { return it }
+        synchronized(lock) {
+            aliasIndex?.let { return it }
+            val map = HashMap<String, String>(1024)
+            runCatching {
+                ctx.assets.open(LOGO_ALIAS_FILE).bufferedReader(Charsets.UTF_8).useLines { lines ->
+                    lines.forEach { line ->
+                        val tab = line.indexOf('\t')
+                        if (tab > 0) map[line.substring(0, tab)] = line.substring(tab + 1)
+                    }
+                }
+            }.onFailure {
+                UiLog.w(TAG, "别名索引读取失败：${it.javaClass.simpleName}")
+            }
+            UiLog.i(TAG, "台标别名索引已加载：${map.size} 条")
+            aliasIndex = map
             return map
         }
     }
@@ -180,17 +221,20 @@ object ChannelLogoStore {
      * 目的：把「频道名 → 台标文件名 → 全部候选地址」这条链路的实际结果打进日志。
      * 无 adb 时这是唯一能核对换算是否正确的手段；也便于日后排查「除央视外都没有台标」。
      *
-     * 选的三个名字正是最容易出错的特例：
+     * 选的名字正是最容易出错的特例：
      *   `CCTV-1`   —— 直播源写法带横杠，台标仓库是 `CCTV1.png`
      *   `CCTV-5+`  —— 加号必须保留，且归一化后是 `cctv5plus` 而**不是** `cctv5`
      *   `凤凰香港`  —— 别名表改写为规范名 `凤凰卫视香港台`
+     *   `CCTV1综合` / `湖南卫视高清` / `中央一台` —— v1.21 新增，专测别名索引
+     *     （内置精简到 165 张后，这类写法必须靠索引才能命中）
      */
-    private fun selfCheckOnce(index: Map<String, String>) {
+    private fun selfCheckOnce(ctx: Context, index: Map<String, String>) {
         runCatching {
-            UiLog.i(TAG, "链路自检：内置台标 ${index.size} 个，回退顺序＝内置 → CDN → raw → 上游 → gitee镜像")
-            listOf("CCTV-1", "CCTV-5+", "凤凰香港").forEach { name ->
+            UiLog.i(TAG, "链路自检：内置台标 ${index.size} 个，回退顺序＝内置 → 源自带 tvg-logo → CDN → raw → 上游 → gitee镜像")
+            listOf("CCTV-1", "CCTV-5+", "凤凰香港", "CCTV1综合", "湖南卫视高清", "中央一台", "翡翠台").forEach { name ->
                 val fileName = ChannelName.logoFileName(name)
-                val builtin = index[fileName.lowercase()]?.substringBeforeLast('.')
+                // 直接走 [doMatch]：文件名直查 + 别名索引两条路都要验到
+                val builtin = doMatch(ctx, name)
                 UiLog.i(
                     TAG,
                     "链路自检：「$name」→ 文件名「$fileName」→ " +
@@ -229,7 +273,23 @@ object ChannelLogoStore {
         val index = indexOf(ctx)
         if (index.isEmpty()) return null
 
-        val hit = index[fileName.lowercase()]?.substringBeforeLast('.')
+        // ① 文件名直查：CCTV-1 → CCTV1、CCTV-5+ → CCTV5+、凤凰香港 → 凤凰卫视香港台
+        var hit = index[fileName.lowercase()]?.substringBeforeLast('.')
+
+        // ② v1.21 别名索引：把「CCTV1综合 / CCTV-1 综合 / 中央一台 / 湖南卫视高清」
+        //    这类在直播源里极常见、但与台标文件名对不上的写法也映射到内置台标。
+        //    这一步是"内置 165 张也能覆盖绝大多数频道"的关键。
+        if (hit == null) {
+            val normalized = ChannelName.normalize(channelName)
+            if (normalized.isNotBlank()) {
+                hit = aliasOf(ctx)[normalized]
+                // ③ 再退一步：央视系列改按核心标识查（「CCTV-5+赛事」→ cctv5plus）
+                if (hit == null) {
+                    val core = ChannelName.coreKeyOf(normalized)
+                    if (core != null && core.startsWith("cctv")) hit = index[core]?.substringBeforeLast('.')
+                }
+            }
+        }
 
         // 换算结果必须留下可核对的痕迹：CCTV-1→CCTV1、CCTV-5+→CCTV5+、凤凰香港→凤凰卫视香港台
         // 都只在这里体现。走 matchCache 保护，同一个频道名只会打一次，不会刷屏。
@@ -566,6 +626,7 @@ object ChannelLogoStore {
             candidateCache.clear()
             pending.clear()
             builtinIndex = null
+            aliasIndex = null
         }
         bitmapCache.evictAll()
     }

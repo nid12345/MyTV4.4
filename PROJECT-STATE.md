@@ -2498,3 +2498,49 @@ Cloudflare Worker / 默认隐藏四个分组。
 - API 19 验证 PASS：装得上 / 起得来 / 0 FATAL；日志实证
   「内置台标 932 个」「翡翠台 / CCTV1 / 湖南卫视 全部内置命中」「台标已加载（远程）= 0 条」
   「订阅源尝试链：共 6 个」「看门狗已启动（阈值 8000ms）」
+
+---
+
+# v1.21（versionCode 26 / `1.21-legacy.26`，2026-10-18）
+
+四组需求：修刚崩的 ANR（=左侧列表卡死真凶）/ 内置台标瘦身 + 别名索引 /
+投屏搜不到小米电视 / 顺手清掉两处 O(N×M)。
+
+## 实现要点（签名级）
+
+| 需求 | 入口 |
+|---|---|
+| ① ANR + 卡死根因 | `EpgList.match`：**线性扫描 → 哈希索引**。新增 `normIndex`（normalize(频道名)→Epg）与 `coreIndex`（coreKey→Epg，仅 cctv*），`ensureIndex` 按 `indexedFor !== list` 引用比较自动重建；`lookup()` 先精确归一化再 cctv 核心；`matchCache` 容量 1024→2048 且键改为 `epgName\u0001name`（原键会让同名不同展示名的频道串台）。`ChannelName`：新增 4096 条 `normalize` memo、`coreKeyOf(normalized)`（免二次归一化）、`matches` 复用已归一化串。`MainActivity.fetchEpg` 在**后台线程**调 `warmUp()` 预热索引 |
+| ① 同链两处 | `programmesOf`：`firstOrNull{isLive}` → `nowProgramme()`（二分 + 未排序时线性兜底）。`renderFavoritesPanel`：每个收藏两遍全表扫 → 先建 `HashMap<频道名, Channel>` |
+| ② 台标瘦身 | `assets/channel_logo`：932 → **165** 张（央视全套 + 各省卫视 + 港台常见 + 少儿），6.5MB → 1.4MB。`ChannelLogoStore` 新增 `aliasIndex`（懒读 `assets/logo_alias.txt`，648 条），`doMatch` 三级：文件名直查 → 别名索引 → cctv 核心 |
+| ③ 投屏 | `DlnaDiscovery`：搜索目标加 `ssdp:all` + `upnp:rootdevice`；**逐网卡搜索**（wlan→eth→en，排除 tun/ppp/utun，最多 3 张）；MX 2→3；默认 6s→8s；AVTransport 判据改 `contains`（小米的 `MiAVTransport:0.5` 不误杀）。`DlnaCastRepository.SCAN_TIMEOUT_MS` 6s→8s |
+
+## 关键认知（复用）
+
+1. **「焦点移动 → 重活」是电视端卡顿第一嫌疑，而最狠的一种是「每次匹配都跑正则」**：
+   `normalize` = NFKC + 4 次正则，被 `分组频道数 × 节目单频道数` 一乘就是千万次。
+   凡是「集合 A 里每个元素都要在集合 B 里找对应」的逻辑，一律先建索引。
+2. **ANR 堆栈里的 `Pattern.matcher` 几乎可以直接定罪**：主线程正则 = 灾难。
+3. **SSDP 只发 `MediaRenderer:1/2/3` 是找不到小米的**：小米电视/盒子报的是
+   `MiMediaRenderer:0.5` / `MiAVTransport:0.5`，只回应 `ssdp:all` / `upnp:rootdevice`。
+   抖音搜得到、自家 App 搜不到，差别就在 ST 上。判「是不是渲染器」要拉到描述 XML 再判。
+4. **M-SEARCH 的 MX 决定响应窗口**：小米响应要 1 秒以上，MX=2 会漏；MX 要 ≥3。
+5. **投屏搜索必须逐网卡**：盒子同时有网线和 WiFi 时只挑一张，挑错就是"搜不到"。
+6. **SOAP 的 serviceType 必须用设备描述里的原值**（`MiAVTransport:0.5` 而非标准 URN），
+   控制器本来就读 `avTransportServiceType`，这点是对的。
+7. **别名表要让「主名 → 内置文件」先匹配上，再登记别名**：iptv-api 的 alias.txt
+   第一列是主名，只有主名能对应到内置台标时才值得把它的别名收进来，
+   否则会把「CCTV-10 的别名」指到一张不存在的图上。
+8. **安卓内置台标不要贪全**：932 张 6.5MB 只换来覆盖率 100%，
+   165 张 1.4MB + 648 条别名索引就能覆盖日常看的台，APK 小 5.9MB。
+9. **本机内存只剩 ~15MB 空闲时 API 19 模拟器活不过 1 分钟**（会被系统杀掉）。
+   需要长跑的验证改用 **JVM 单元测试**（`testOptions.unitTests.isReturnDefaultValues=true`
+   让 android.util.Log/SystemClock 返回默认值，不引 Robolectric 也能测纯 Kotlin 逻辑）。
+   v1.21 的 `EpgMatchTest` 就是这么验收的：339ms → 8ms(建索引)+0ms(匹配)。
+
+## 产物（v1.21，versionCode 26）
+
+- `dist/MyTV4.4-v1.21-legacy26.apk`（release，10,193,401 B，MD5 `71551c6dc4c6ee5caab5b7ef92588519`）
+- 较 v1.20 **−5.86 MB**（16.05MB → 10.19MB），全部来自内置台标瘦身
+- 新增 `app/src/test/java/top/yogiczy/mytv/legacy/EpgMatchTest.kt`（3 项测试全过）
+- 新增资产 `app/src/main/assets/logo_alias.txt`（648 条，13KB）
