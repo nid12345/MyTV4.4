@@ -387,6 +387,48 @@ class MainActivity : AppCompatActivity() {
     /** 切换源失败后红色提示停留多久再回退 —— 用户要求"三秒左右"。 */
     private val LOAD_FAIL_FALLBACK_MS = 3_000L
 
+    /**
+     * v1.20 需求 5：某个源失败后，红色提示停多久再自动试下一个源。
+     *
+     * 刻意比 [LOAD_FAIL_FALLBACK_MS] 短：这条路径一次要试十几个源，
+     * 每个都停 3 秒的话，最后一个源要等近一分钟才轮到 —— 那还不如直接放弃。
+     * 1.2 秒足够让人看见"这个源挂了"，又不至于让整条链慢到不可用。
+     */
+    private val LOAD_FAIL_NEXT_SOURCE_MS = 1_200L
+
+    /**
+     * v1.20 需求 5：启动时的**订阅源尝试链**。
+     *
+     * 顺序 = 「当前源」排最前，其余按 `Prefs.sources` 的列表顺序跟在后面（去重）。
+     * 手动换源不使用它（那条路径的语义是"失败就退回原来那个源"）。
+     */
+    private var sourceChain: List<IptvSource> = emptyList()
+
+    /** 当前正在试 [sourceChain] 的第几个。 */
+    private var sourceChainIdx = 0
+
+    /** 装配尝试链并从第一个源开始加载。 */
+    private fun loadSourceChain() {
+        val all = Prefs.sources(this)
+        val cur = Prefs.currentSourceUrl(this)
+        // 当前源排最前 → 用户上次看的是它，优先保证"打开就能接着看"；
+        // 其余保持设置页里的顺序（那个顺序是用户自己排的）。
+        sourceChain = (all.filter { it.url == cur } + all.filterNot { it.url == cur })
+            .distinctBy { it.url }
+        sourceChainIdx = 0
+        UiLog.i("界面", "订阅源尝试链：共 ${sourceChain.size} 个，首个=${sourceChain.firstOrNull()?.name}")
+        loadSource(sourceChain.firstOrNull()?.url.orEmpty())
+    }
+
+    /** 取链里的下一个源；没有（= 全部试完）返回 null。 */
+    private fun nextSourceInChain(): IptvSource? {
+        if (sourceChain.isEmpty()) return null
+        val i = sourceChainIdx + 1
+        if (i !in sourceChain.indices) return null
+        sourceChainIdx = i
+        return sourceChain[i]
+    }
+
     /** 显示「正在加载直播源」提示窗。[opaque] = true 时铺全屏黑（切换订阅源用）。 */
     private fun showLoadingTip(text: String, opaque: Boolean) {
         if (!::rootView.isInitialized) return
@@ -578,6 +620,24 @@ class MainActivity : AppCompatActivity() {
     /** 当前亮度 0f..1f；< 0 = 还没调过（首次调节时读系统亮度作起点）。 */
     private var brightnessLevel = -1f
 
+    /**
+     * 当前音量 0f..1f（**浮点累加器**，与亮度同一套逻辑）；< 0 = 还没调过。
+     *
+     * ⚠️ v1.20 需求 6：这是"右侧音量卡卡的"这一侧的**根因**。
+     * 老实现没有这个累加器 —— `adjustEdgeBy` 里是
+     * `val v = (volumeRatio() + delta).coerceIn(0f, 1f)`：
+     * 每次都从**系统当前的整数档**重新起算，而 `delta` 一个滑动事件只有千分之几
+     * （屏高 1080、满量程 60% → 滑 6px 才 1%），
+     * 于是 `round((cur/15 + 0.004) * 15)` 永远还是 `cur` —— 值**根本不动**，
+     * 直到某次累计够半档才突然跳一格。观感就是"卡卡的、不跟手"，
+     * 而亮度那侧因为有 [brightnessLevel] 这个浮点状态，同样的手势是连续平滑的。
+     * 现在两边用同一套写法。
+     */
+    private var volumeLevel = -1f
+
+    /** 最近一次真正写进系统的整数档（用于跳过无意义的跨进程调用）。 */
+    private var appliedVolumeStep = -1
+
     /** 调节条显示时长 —— 与系统音量条同量级。 */
     private val LEVEL_BAR_HIDE_MS = 2_000L
 
@@ -688,21 +748,45 @@ class MainActivity : AppCompatActivity() {
     private fun audioManager(): AudioManager? =
         getSystemService(Context.AUDIO_SERVICE) as? AudioManager
 
+    /** 系统当前音量的比例 0f..1f（只用于**初始化**累加器，不作为每次的起算点）。 */
     private fun volumeRatio(): Float {
         val am = audioManager() ?: return 0f
         val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
         return am.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max
     }
 
+    /** 音量累加器的起点（首次调节时读系统音量，与 [ensureBrightness] 对称）。 */
+    private fun ensureVolume(): Float {
+        if (volumeLevel < 0f) {
+            val am = audioManager()
+            if (am != null) {
+                val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                appliedVolumeStep = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                volumeLevel = appliedVolumeStep.toFloat() / max
+            } else {
+                volumeLevel = 0f
+            }
+        }
+        return volumeLevel
+    }
+
     /**
      * 设媒体音量。
      *
      * ⚠️ `flags` 传 **0**（不传 `FLAG_SHOW_UI`）—— 用户明确要求不要显示系统调节条。
+     *
+     * v1.20 需求 6：**只在整数档真的变了时才打 `setStreamVolume`**。
+     * 那是一次跨进程调用（还会触发系统侧的音量变化广播），`onScroll` 一秒能来几十次，
+     * 每次都打就是主线程被 binder 拖住 —— 亮度那侧只是改本进程的
+     * `window.attributes`，没有这个开销，所以两边手感不一样。
      */
     private fun setVolumeRatio(r: Float) {
         val am = audioManager() ?: return
         val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-        val v = Math.round(r.coerceIn(0f, 1f) * max).coerceIn(0, max)
+        volumeLevel = r.coerceIn(0f, 1f)
+        val v = Math.round(volumeLevel * max).coerceIn(0, max)
+        if (v == appliedVolumeStep) return          // 没跨档 → 一次 IPC 都不打
+        appliedVolumeStep = v
         runCatching { am.setStreamVolume(AudioManager.STREAM_MUSIC, v, 0) }
     }
 
@@ -712,7 +796,10 @@ class MainActivity : AppCompatActivity() {
         val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
         val next = (am.getStreamVolume(AudioManager.STREAM_MUSIC) + step).coerceIn(0, max)
         runCatching { am.setStreamVolume(AudioManager.STREAM_MUSIC, next, 0) }
-        showLevelBar(LevelBarView.Kind.VOLUME, next.toFloat() / max)
+        // 同步累加器：否则下一次触屏调节会从"按键之前"的旧值起算，音量会往回跳一格。
+        appliedVolumeStep = next
+        volumeLevel = next.toFloat() / max
+        showLevelBar(LevelBarView.Kind.VOLUME, volumeLevel)
     }
 
     /**
@@ -731,7 +818,9 @@ class MainActivity : AppCompatActivity() {
                 showLevelBar(LevelBarView.Kind.BRIGHTNESS, v)
             }
             EdgeZone.VOLUME -> {
-                val v = (volumeRatio() + delta).coerceIn(0f, 1f)
+                // v1.20 需求 6：起算点改成累加器 [ensureVolume]（原来是每次重读系统整数档，
+                // 小增量被反复截断 → 不跟手）。与上面亮度那支现在完全对称。
+                val v = (ensureVolume() + delta).coerceIn(0f, 1f)
                 setVolumeRatio(v)
                 showLevelBar(LevelBarView.Kind.VOLUME, v)
             }
@@ -983,7 +1072,9 @@ class MainActivity : AppCompatActivity() {
         // v1.7（用户要求）：首次安装先弹《使用须知》（全屏覆盖层，照搬原版 1.7 文案与样式）。
         // 放在 loadSource 之后：底层继续加载，同意后直接就是可播状态。
         if (!Prefs.appAgreementAgreed(this)) showAgreementGate()
-        loadSource(Prefs.currentSourceUrl(this))
+        // v1.20 需求 5：**依次尝试订阅源**（原来是 `loadSource(Prefs.currentSourceUrl(this))`，
+        // 第一个源挂掉就再也不试第二个）。详见 [loadSourceChain]。
+        loadSourceChain()
         refreshTopRight()
         // v1.8 接通「升级提醒」：启动后自动静默检查一次更新（设置页里那一项原来只写 Prefs、无人读）。
         if (Prefs.updateRemindEnable(this)) checkStartupUpdate()
@@ -1218,6 +1309,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        // v1.20 需求 2：退到后台 → 停掉卡死判定。
+        // 后台时主线程本来就会被系统挂起（还可能整进程被冻结），此时"心跳超时"是正常现象，
+        // 不停掉就是每退一次后台都误报一条 ANR。
+        top.yogiczy.mytv.legacy.data.Watchdog.setEnabled(false)
         // 用户需求 4：跳去其他应用（含系统安装器、权限弹窗、锁屏）前先暂停画面。
         // 好处有二：后台不再空跑解码与拉流；回来时不会发现画面已经落后一大截。
         if (!::player.isInitialized) return
@@ -1233,6 +1328,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        top.yogiczy.mytv.legacy.data.Watchdog.setEnabled(true)
         // 用户需求 4：回到播放界面 → 恢复播放。只恢复"后台造成的暂停"。
         if (!::player.isInitialized || !pausedByBackground) return
         pausedByBackground = false
@@ -1246,6 +1342,7 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(speedTick)
         handler.removeCallbacks(tempChannelHide)
         handler.removeCallbacks(tempInfoMaxShow)
+        handler.removeCallbacks(previewEpgRender)   // v1.20：节目单预览的合帧渲染
         // 断开台标回调：Activity 已销毁，再回填会拿到一个死掉的 View 树
         ChannelLogoStore.onLogoLoaded = null
         if (::player.isInitialized) player.release()
@@ -1612,6 +1709,31 @@ class MainActivity : AppCompatActivity() {
      * `onSelect = onChannelSelected`（本工程的 [selectChannel]）。
      * 用户反馈的「光标按到哪个就自动跳转」正是此前把 [selectChannel] 直接挂在了焦点回调上。
      */
+    // ---------------------------------------------------------------------------
+    // v1.20 需求 2：**节目单预览合帧渲染**（这是"左侧菜单挑节目卡死"的主因之一）
+    // ---------------------------------------------------------------------------
+    // `epgColumn.render()` 的代价远比看上去大：`notifyDataSetChanged()` 重建整列 +
+    // `buildDayColumn()` 用 SimpleDateFormat 格式化**每一条节目**的日期 +
+    // 跨天时还要 `dayColumn.submit()` 再起一列。单频道几十到两百条节目，一次几毫秒到几十毫秒。
+    //
+    // 而它挂在**每一次焦点移动**上。遥控器按住上下键是 ~20 次/秒的重复事件，
+    // 于是主线程一秒要重建 20 次节目单列 —— 老设备（单核 / 512MB 那批）直接被压死，
+    // 表现就是"挑着挑着卡住没反应"，再往后就是 ANR / 被系统杀。
+    //
+    // 改法：焦点移动只登记"最后停在哪个频道"，渲染延后 90ms 且**可被下一次移动顶掉**。
+    // 用户单步按一下 → 90ms 后照常出现（人眼感知不到这点延迟）；
+    // 连按/长按 → 中途那些帧全部合掉，只在停下来的那一刻渲染一次。
+    // ---------------------------------------------------------------------------
+    private val EPG_PREVIEW_DEBOUNCE_MS = 90L
+
+    private var previewEpgChannel: Channel? = null
+
+    private val previewEpgRender = Runnable {
+        val ch = previewEpgChannel ?: return@Runnable
+        previewEpgChannel = null
+        epgColumn.render(epgList?.match(ch))
+    }
+
     private fun onChannelPreview(ch: Channel, idx: Int) {
         channelIdx = idx
         // 问题 1（用户）：记下光标停留的频道，下次唤出面板时直接回到这里。
@@ -1621,7 +1743,9 @@ class MainActivity : AppCompatActivity() {
             lastFocusInChannelColumn = true
         }
         // 节目单列随光标预览（1.7 行为）；底部信息栏仍按**正在播放**的频道显示，不跟着动。
-        epgColumn.render(epgList?.match(ch))
+        previewEpgChannel = ch
+        handler.removeCallbacks(previewEpgRender)
+        handler.postDelayed(previewEpgRender, EPG_PREVIEW_DEBOUNCE_MS)
         UiLog.d("界面", "频道预览（未切台）→ ${ch.name}")
     }
 
@@ -1884,6 +2008,29 @@ class MainActivity : AppCompatActivity() {
     private val keysNone = Keys.Handler()
 
     /**
+     * v1.20 需求 5：加载期间**哪些按键要放行**（见 [dispatchKeyEvent] 里的那段注释）。
+     *
+     * @return true = 放行（交给焦点系统 / 按键路由），false = 照旧吃掉
+     */
+    private fun loadingAllowsInput(event: KeyEvent): Boolean {
+        // ① 菜单键：唤出快捷菜单（`keysPanelCollapsed.onSettings` → [onMenuKeyPlaceholder]），
+        //    快捷菜单里就有"设置"入口，用户因此能在加载期间改配置、换源、清缓存。
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_SETTINGS,
+                KeyEvent.KEYCODE_HELP, KeyEvent.KEYCODE_H -> return true
+            }
+        }
+        // ② 已经有弹层在屏 → 一律交给它（判据与 [overlayStack] 同源，但这里只看"有没有"，
+        //    不看栈顶是谁 —— 加载期间任何操作层都比"干等"优先）
+        return (::settings.isInitialized && settings.isOpen) ||
+            (::quickOp.isInitialized && quickOp.isOpen) ||
+            (::epgPanel.isInitialized && epgPanel.isOpen) ||
+            groupManageView != null || epgSourceView != null || sourceManageView != null ||
+            dlnaView != null || dialogView != null || agreementGate != null
+    }
+
+    /**
      * 按键统一入口：**必须用 `dispatchKeyEvent`，不能用 `onKeyDown`**。
      *
      * 原因（M1 实测发现，原计划 §6.1 写的 `Activity.onKeyDown` 是错的）：
@@ -1902,7 +2049,16 @@ class MainActivity : AppCompatActivity() {
         // 此刻底层的频道列表正在被整体替换，任何操作都可能落在半旧半新的状态上；
         // 而且提示窗是模态的，用户此时也没有可操作的对象。
         // ⚠️ 绝不能放行：返回键会一路落到 Activity 默认实现，**直接退出应用**。
-        if (sourceLoading) return true
+        //
+        // v1.20 需求 5（用户原话：「加载期间用户可以调出设置菜单进行其他操作」）：
+        // 上面那条"一律吃掉"在 v1.20 之前是**无条件**的，于是源加载不出来的时候
+        // （v1.20 起还会连着试十几个源，每条最长十几秒）遥控器完全失灵 ——
+        // 想进去改订阅源地址都不行，只能干等。现在开两个口子：
+        //   ① MENU / SETTINGS / HELP / H 键 → 放行，用来唤出快捷菜单（里面有设置入口）；
+        //   ② 已经有任何弹层在屏（设置页 / 快捷菜单 / 各抽屉 / 对话框）→ 全部放行给它，
+        //      否则"打开了设置页却按不动"比"打不开"更难受。
+        // 除此以外照旧吃掉（返回键尤其不能放 —— 见上面的 ⚠️）。
+        if (sourceLoading && !loadingAllowsInput(event)) return true
         // v1.14 需求 2：音量键也走**应用内置调节条**。
         // `setStreamVolume(..., flags = 0)` 刻意不传 `FLAG_SHOW_UI`，
         // 所以系统那条音量 UI 不会冒出来（用户要求"不要显示系统的调节显示条"）。
@@ -1924,16 +2080,53 @@ class MainActivity : AppCompatActivity() {
         // v1.16 需求 2：面板里二级菜单（中栏）到边界时，上下键**顺延到相邻导航项**。
         // 必须在这里拦：这是"事件进 View 树之前"的最后一站，再往下就被系统的
         // focusSearch 接走了（找不到下一个可聚焦项时会静默什么都不做）。
-        // 只认首次按下（repeatCount == 0）—— 按住不放时让系统按原样连续走焦点，
-        // 否则长按一下会"唰"地连跨好几个分组。
-        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-            when (event.keyCode) {
-                KeyEvent.KEYCODE_DPAD_DOWN -> if (handlePanelEdgeMove(down = true)) return true
-                KeyEvent.KEYCODE_DPAD_UP -> if (handlePanelEdgeMove(down = false)) return true
+        //
+        // v1.20 需求 4：**不再只认首次按下**。原来 `repeatCount == 0` 的初衷是
+        // "按住不放不要唰地连跨好几个分组"，但它有个致命副作用 ——
+        // 长按快速下翻时，跨组之后剩下的**全部是重复事件**，于是一路跨到最后一个分组
+        // 就再也拦不住，事件落进 View 树；此刻中栏正在整列替换、焦点是悬空的，
+        // 系统会把焦点交给窗口里第一个可聚焦控件 = 一级菜单第 1 项「换源」→
+        // 用户看到的就是「挑到二级菜单底部，光标直接跳到一级菜单里」。
+        // 现在改成"认重复事件 + 节流 + 过渡期吞事件"三件套：
+        //   ① [crossGroupInFlight]（整列替换 + 等焦点落地这段窗口）→ 一律吞掉；
+        //   ② 其余重复事件交给 [handlePanelEdgeMove]，里面按 [CROSS_GROUP_MIN_INTERVAL_MS]
+        //      节流，长按最快也只有 ~3 个分组/秒，不会"唰"地穿过去；
+        //   ③ 到了边界（不管有没有下一个分组）**都返回 true 消费掉**，焦点原地不动。
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            val isDown = event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+            val isUp = event.keyCode == KeyEvent.KEYCODE_DPAD_UP
+            if (isDown || isUp) {
+                // 兜底：真出现"落地回调丢了"的极端情况也不能把用户永久锁死，
+                // 超过 1.2 秒就当这次跨组已经结束。
+                if (crossGroupInFlight &&
+                    android.os.SystemClock.uptimeMillis() - crossGroupStartedAt > 1_200L
+                ) {
+                    UiLog.w("界面", "跨组过渡超时 → 强制解除（防止按键被永久吞掉）")
+                    crossGroupInFlight = false
+                    if (::navColumn.isInitialized) navColumn.setFocusSelectSuppressed(false)
+                }
+                if (crossGroupInFlight) return true
+                if (handlePanelEdgeMove(down = isDown)) return true
             }
         }
         return if (Keys.dispatch(event, currentKeyHandler())) true else super.dispatchKeyEvent(event)
     }
+
+    // ---------------------------------------------------------------------------
+    // v1.20 需求 4：跨组过渡的状态机
+    // ---------------------------------------------------------------------------
+
+    /** 整列替换 + 等新焦点落地这段窗口。为 true 时上下键一律吞掉（见 [dispatchKeyEvent]）。 */
+    private var crossGroupInFlight = false
+
+    /** 本次跨组开始的时刻（[crossGroupInFlight] 的超时兜底用）。 */
+    private var crossGroupStartedAt = 0L
+
+    /** 上一次跨组的时刻 —— 长按连发时靠它节流。 */
+    private var lastCrossGroupAt = 0L
+
+    /** 两次跨组的最小间隔：短于它就"到底了停一下"，不让长按瞬间穿掉好几个分组。 */
+    private val CROSS_GROUP_MIN_INTERVAL_MS = 320L
 
     /**
      * 左侧面板"二级菜单"（中栏）上下键到边界时**跨组顺延**。
@@ -1970,15 +2163,30 @@ class MainActivity : AppCompatActivity() {
         if (count <= 0) return false
         val atEdge = if (down) idx == count - 1 else idx == 0
         if (!atEdge) return false
+        // ----------------------------------------------------------------------
+        // ★ v1.20 需求 4：走到这里就一定是「二级菜单到底 / 到顶」了。
+        //   从这一行往下**必须永远返回 true** —— 绝不再把事件放行给系统的 focusSearch，
+        //   否则焦点会被交给窗口里第一个可聚焦控件（一级菜单第 1 项「换源」），
+        //   正是用户报的「挑到二级菜单底部后光标直接跳到一级菜单里」。
+        //   v1.19 只处理了"跨组过程中焦点悬空"这一种情形，漏了"已经到真正边界"这一种，
+        //   于是按到最后一个分组的末项时照样会跳出去。
+        // ----------------------------------------------------------------------
         // v1.18 需求 6：「换源」「系统应用」不参与跨组 —— 焦点停在这两项的列表里时，
-        // 上下键到边界就该"没有更多了"，不许顺延到相邻分组去。
-        if (!isCrossGroupEntry(navIdx)) return false
+        // 上下键到边界就该"没有更多了"，不许顺延到相邻分组、也不许跳回一级菜单。
+        if (!isCrossGroupEntry(navIdx)) return true
+        // 长按连发的节流：刚跨过组就又到底了 → 停一下（消费掉，焦点不动），
+        // 避免按住不放时"唰"地穿过好几个分组。
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastCrossGroupAt < CROSS_GROUP_MIN_INTERVAL_MS) return true
         // v1.18 需求 2/3/5：往相邻方向找"参与跨组且**有内容**"的那一项。
         // 空分组、空收藏、以及不参与跨组的换源/系统应用，全部跳过。
         val next = nextCrossGroupEntry(navIdx, down)
-        // v1.18 需求 4：到了真正的边界（第一个分组首项按上 / 最后一个分组末项按下）→
-        // 不消费这个按键，焦点原地不动。
-            ?: return false
+        // v1.18 需求 4 / v1.20 需求 4：到了真正的边界（第一个分组首项按上 /
+        // 最后一个分组末项按下）→ **消费这个按键**，焦点原地不动，绝不跳到一级菜单。
+            ?: return true
+        lastCrossGroupAt = now
+        crossGroupInFlight = true
+        crossGroupStartedAt = now
         UiLog.i(
             "界面",
             "二级菜单${if (down) "到底" else "到顶"}（第 ${idx + 1}/$count 项）→ " +
@@ -1991,11 +2199,14 @@ class MainActivity : AppCompatActivity() {
         navColumn.setFocusSelectSuppressed(true)
         channelColumn.focusEdgeAfterSubmit(fromEnd = !down) { landed ->
             if (landed) {
+                // 新分组的目标行真的拿到焦点了 → 解除屏蔽、放开按键
+                crossGroupInFlight = false
                 navColumn.setFocusSelectSuppressed(false)
             } else {
                 // 极慢设备再完整重试一轮；仍失败也必须解除屏蔽，避免一级菜单永久失去响应。
                 UiLog.i("界面", "跨组目标行首轮聚焦未落地，重试一次")
                 channelColumn.focusEdge(fromEnd = !down) { retryLanded ->
+                    crossGroupInFlight = false
                     navColumn.setFocusSelectSuppressed(false)
                     if (!retryLanded) UiLog.i("界面", "跨组目标行重试后仍未取得焦点")
                 }
@@ -3551,8 +3762,14 @@ class MainActivity : AppCompatActivity() {
         if (::bottomBar.isInitialized) bottomBar.visibility = View.GONE
         if (::tempInfoBar.isInitialized) tempInfoBar.visibility = View.GONE
         if (switching) hideAllFramesForSourceSwitch()
+        // v1.20 需求 5：链上的第 2 个及以后的源要把"正在试第几个"说清楚 ——
+        // 否则用户只看到"正在加载直播源…"反复闪，不知道是卡住了还是在换源。
+        val chainHint = if (!switching && sourceChain.size > 1 && sourceChainIdx > 0) {
+            "（${sourceChainIdx + 1}/${sourceChain.size}）${sourceChain.getOrNull(sourceChainIdx)?.name.orEmpty()}"
+        } else ""
         showLoadingTip(
-            if (switching) "正在切换直播源：$label …" else "正在加载直播源…",
+            if (switching) "正在切换直播源：$label …"
+            else "正在加载直播源…$chainHint",
             opaque = switching,
         )
 
@@ -3585,9 +3802,39 @@ class MainActivity : AppCompatActivity() {
                         else "加载直播源失败：$reason"
                     )
 
-                    // 只有「一个频道都没有」时才用演示源兜底，保证首次启动/断网时界面不是空的。
+                    // ------------------------------------------------------------------
+                    // v1.20 需求 5：**依次尝试下一个订阅源**（仅"启动加载"这条路径）
+                    // ------------------------------------------------------------------
+                    // 用户原话：「当打开 app 后如果首个订阅源加载不出来，可以依次加载下一个
+                    // 订阅源，直到加载到订阅源为止，如果全部订阅源都失效了再跳到调试源」。
+                    //
+                    // 之前的行为是：第一个源失败 → 红色提示 3 秒 → 直接拿演示源兜底，
+                    // 后面配的十几个源**一个都不试** —— 于是"主源临时挂了"就等于
+                    // "整个 app 变成测试频道"，而这恰恰是订阅源这种东西最常见的故障形态。
+                    //
+                    // 手动换源（switching = true）**不走**这条链：那条路径的既定语义是
+                    // "切失败就退回原来那个源"（v1.14 需求），用户是主动点的、看得见结果。
+                    // ------------------------------------------------------------------
+                    val nextSrc = if (!switching) nextSourceInChain() else null
+                    if (nextSrc != null) {
+                        UiLog.i(
+                            "界面",
+                            "订阅源加载失败 → 自动尝试下一个（${sourceChainIdx + 1}/${sourceChain.size}）：${nextSrc.name}"
+                        )
+                        android.util.Log.w("源加载", "加载失败（$reason）→ 转下一个源 ${nextSrc.url}")
+                        // 红字停 1.2 秒让用户看见"这个源挂了"，再自动往下试
+                        handler.postDelayed({
+                            hideLoadingTip()
+                            Prefs.setCurrentSource(this, nextSrc.url)
+                            loadSource(nextSrc.url)
+                        }, LOAD_FAIL_NEXT_SOURCE_MS)
+                        return@post
+                    }
+
+                    // 全部订阅源都失效了 → 才落到调试源（演示源）
                     if (groupList.flatChannels().isEmpty()) {
-                        UiLog.i("界面", "当前列表为空 → 用演示源兜底")
+                        UiLog.i("界面", "全部订阅源均不可用 → 用调试源兜底")
+                        android.util.Log.w("源加载", "全部 ${sourceChain.size} 个订阅源都失败 → 调试源")
                         renderAll(ChannelParser.toGroupList(ChannelParser.parse(DEMO_M3U)))
                         fetchEpg()
                     }

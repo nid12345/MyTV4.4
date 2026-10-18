@@ -71,8 +71,26 @@ class App : MultiDexApplication() {
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             // v1.17：落盘逻辑统一收进 CrashStore（`MainActivity.buildUiSafely` 也要用同一份
             // 头部格式，写两遍必然漂移）。头部 = 机型 / Android 版本 / 应用版本。
-            runCatching { top.yogiczy.mytv.legacy.data.CrashStore.save(this, error) }
+            val errorText = runCatching {
+                top.yogiczy.mytv.legacy.data.CrashStore.save(this, error)
+                top.yogiczy.mytv.legacy.data.CrashStore.read(this)?.text
+            }.getOrNull().orEmpty()
+            // v1.20 需求 2：崩溃时**顺手自动上报一次**。
+            // 原来只有用户主动点「一键反馈」才上传，于是"卡死/闪退"这类用户事后未必记得
+            // 反馈的问题，后台永远看不到。这里在进程死之前补一次 POST ——
+            // 卡在进程退出路径上，失败也无所谓（记录仍留在本地，下次启动还能补报）。
+            runCatching { top.yogiczy.mytv.legacy.data.CrashReporter.upload(this, errorText) }
             previous?.uncaughtException(thread, error)
+        }
+        // v1.20 需求 2：主线程卡死（ANR）看门狗。
+        // 崩溃处理器管的是"抛了异常"，看门狗管的是"没抛异常但主线程堵死了" ——
+        // 用户报的「卡死没反应」正是后者，此前没有任何记录、也没有上报入口。
+        installWatchdog()
+    }
+
+    private fun installWatchdog() {
+        runCatching {
+            top.yogiczy.mytv.legacy.data.Watchdog.install(this)
         }
     }
 }
@@ -88,7 +106,7 @@ class App : MultiDexApplication() {
  *    （M0 之前它就停在 "0.3.1-legacy"，比实际版本落后三个版本）。
  */
 object BuildConfigCompat {
-    const val VERSION_NAME = "1.19-legacy.24"
+    const val VERSION_NAME = "1.20-legacy.25"
 
     /**
      * 版本序号（单调递增）。
@@ -109,6 +127,7 @@ object BuildConfigCompat {
      * ⚠️ v1.17：22。
      * ⚠️ v1.18：23。
      * ⚠️ v1.19：24。
+     * ⚠️ v1.20：25。
      */
-    const val VERSION_CODE = 24
+    const val VERSION_CODE = 25
 }

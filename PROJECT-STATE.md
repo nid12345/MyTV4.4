@@ -25,13 +25,13 @@
 ## 当前进度
 
 - 已完成：**M0 / M1 / M2 / M3（含三项补测） / M4 / M5 / M6 / M7 / M8 / M9 / M10 / M13 / M14**
-- 已交付版本：**v1.0 → v1.18**（`versionCode 6 → 23`），全部已发 GitHub Release（tag `v1.8` / `v1.10`～`v1.18`）
+- 已交付版本：**v1.0 → v1.19**（`versionCode 6 → 24`），全部已发 GitHub Release（tag `v1.8` / `v1.10`～`v1.19`）
 - 进行中：**无**
-- **最新产物**：`dist/MyTV4.4-v1.18-legacy23.apk`（release）/ `dist/MyTV4.4-v1.18-legacy23-debug.apk`
+- **最新产物**：`dist/MyTV4.4-v1.19-legacy24.apk`（release）/ `dist/MyTV4.4-v1.19-legacy24-debug.apk`
 - **签名**：`keystore/mytv-release.jks`（alias=mytv，需备份）；
   SHA-256 `02e143e8102283c2a3d26c505ea5fa44962ff84115eb598cbed467c97236f7c2`（v1.7 起未换钥）
 - **阻塞**：无
-- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.18 = `versionCode 23`）
+- 分发仓库：`nid12345/MyTV4.4`；升级清单 `update/version.json`（v1.19 = `versionCode 24`）
 - 下一个强制汇报检查点：**下一轮用户需求到来时**
 
 ## 📌 已知偏差（记入不追究）
@@ -2394,3 +2394,107 @@ Bugly App ID 需注册后填进 `CrashReporter.BUGLY_APP_ID`（QQ 登录 bugly.q
   线上回验：清单 versionCode 23 / size 10944241 / md5 e236b5cc… 与本地产物一致，
   从 Release 取回的 APK `cmp` 逐字节相同、badging 与证书 `02e143e8…` 一致
 - ⚠️ 待办：Bugly App ID（用户注册后填 `CrashReporter.BUGLY_APP_ID` 重新出包）
+---
+
+# v1.19（versionCode 24 / `1.19-legacy.24`，2026-10-16）
+
+五组需求：跨组跳「换源」真 bug / 弹层在手势与长按全面让路 / 崩溃上报去 Bugly 换自建
+Cloudflare Worker / 默认隐藏四个分组。
+
+## 实现要点（签名级）
+
+| 需求 | 入口 |
+|---|---|
+| 跨组跳错 | `ChannelColumnView.focusRow`（`postOnAnimation` 逐帧重试 8 帧，判据用 `requestFocus()` 返回值）+ `PendingEdge.onLanded` 回调；`MainActivity.handlePanelEdgeMove` 换组期间 `navColumn.setFocusSelectSuppressed(true)`，**无论成败都解除** |
+| 弹层让路 | `onScreenSwipe` 与 `onLongPress` 统一改用 `overlayStack().any { it !== panel }`（面板本身放行）；`onLongPress` 额外加 `hitPanel()` —— 面板内长按交给行自己的逻辑，不再被 QuickOp 信息框盖住 |
+| 崩溃上报 | 删 `com.tencent.bugly:crashreport`（-553KB）；`CrashReporter.kt` 只剩一次 `Http.postRaw`；`App.kt` 去掉 `init`；服务端 `mytv-bug-report/`（单文件 Worker + D1 + `deploy.sh` + 46 项断言测试） |
+| 默认隐藏 | `Prefs.CURRENT_CONFIG_VERSION` 6→7；`applyDefaultHiddenGroups` 按「key 是否存在」补缺；`resetAll` 同步带上默认值 |
+
+## 关键认知（复用）
+
+1. **焦点悬空是被系统兜底成"第一个可聚焦视图"**：RecyclerView 整列内容替换时，
+   当前聚焦的行被 detach，Android 随即把焦点交给窗口里第一个可聚焦控件（本工程是一级菜单「换源」）。
+   而一级菜单是「焦点即选中」→ 伪聚焦直接触发 `onNavSelected(0)`。
+   **凡是"跳到了列表里第一个不该去的地方"，先查是不是焦点被系统兜底了。**
+2. **为什么只在第一↔第二分组出错**：收藏行与当前源频道**同名** → 稳定 ID 命中 →
+   行就地重绑，焦点不丢；两个频道分组之间无同名频道 → 行被回收 → 焦点必丢。
+   这种"同名与否决定焦点丢不丢"的不对称，是 RecyclerView 焦点问题的典型指纹。
+3. **跨帧重试要用 `requestFocus()` 的返回值判定**：拿到 ViewHolder ≠ 焦点落在它身上。
+4. **屏蔽必须保证解除**：屏蔽一级菜单伪选中的那段代码，无论成败都要解除，
+   否则一级菜单永久失灵（比原 bug 更严重）。
+5. **弹层判据只能有一份**：`overlayStack()` 早已完整，点按/滑动/长按三处却各抄了一份且不一致。
+   已统一；**新增手势入口时一律用它，不要再手写清单**。
+6. **`dumpsys activity top` 的 visibility 标志在 `{hash}` 之后**，
+   前面还有一个字符，肉眼极易看错（脚本用 `line.split('{')[1].split()[1][0]`）。
+7. **SQL 绑定顺序错了不报错**：接口照样 200，只有把「只 INSERT 过、从没被 UPDATE 过」
+   的那条记录单独断言才暴露（`sample` 拿到了时间戳）。
+8. **Cloudflare Workers 没有 MD5**：指纹用 `SHA-256` 前 16 位即可（只在 Worker 内作查询键，
+   不必与客户端 `CrashStore.fingerprint()` 算法一致）。
+9. **KV 不适合做原子计数**：last-write-wins，并发上报同一指纹会丢计数 → 用 D1 的
+   `ON CONFLICT DO UPDATE SET count = count + 1`。
+10. **限流的两个窗口不能相加**：同一次请求会同时落在分钟窗口与天窗口里，相加会让
+    天额度实际减半；判定要用「已有次数 + 本次」（查询取的是自增前的快照）。
+
+## ⚠️ 待办（用户）
+
+1. **部署 Cloudflare Worker**（`cd mytv-bug-report && ./deploy.sh`）——
+   本机无 Cloudflare 凭据（`~/.wrangler` 不存在）。在此之前 `mytvbug.nide.qzz.io`
+   不解析，「一键反馈」会失败但崩溃记录仍本地留档可复制。
+   要点：`qzz.io` 与 Worker 需同账号；`REPORT_TOKEN` 与 App 里
+   `CrashReporter.CRASH_UPLOAD_TOKEN` 一致（当前 `mytv-bug-report-2026`）。
+2. 电视上装 v1.19 复走五组场景。
+
+## 产物（v1.19，versionCode 24）
+
+- `dist/MyTV4.4-v1.19-legacy24.apk`（release **10,390,716 B**，MD5 `0723c81966216f1294cef29ebe75dec0`，证书 `02e143e8…`）
+- `dist/MyTV4.4-v1.19-legacy24-debug.apk`（debug 12,971,775 B，MD5 `bd0304112275d7bbbcd2da5469e0bb96`）
+- 较 v1.18 **-553,525 B**（移除 Bugly SDK 的净收益）
+- 已发布：Release `v1.19` → https://github.com/nid12345/MyTV4.4/releases/tag/v1.19 ；
+  源码 commit `8fd4453`；线上回验清单与取回的 APK 均逐字节一致
+- 报告 `dist/v1.19-报告.md`；截图 `dist/evidence/v1.19/`（9 张）；验证夹具已删
+
+---
+
+# v1.20（versionCode 25 / `1.20-legacy.25`，2026-10-18）
+
+六组需求：修线上 OOM 崩溃 / 卡死排查 + 卡顿上报入口 / 内置台标仓库 / 二级菜单长按快速下翻 /
+订阅源依次回退 / 触屏音量跟手。
+
+## 实现要点（签名级）
+
+| 需求 | 入口 |
+|---|---|
+| ① OOM 崩溃（线上指纹 `f463af208fa2b6af`） | `ChannelLogoStore`：新增 `MAX_LOGO_BYTES=512KB`（`fetchCapped` 边读边砍）、`MAX_LOGO_PIXELS=256×256`（`sampleSizeFor` 2 的幂降采样）、`decodeSampled`（先 `inJustDecodeBounds` 再真解）、`onDecodeFailed`（**catch Throwable**，OOM 时 `bitmapCache.evictAll()`）；`bitmapCache` 由 `LruCache(64)`（按张数）改为**按字节**（堆的 1/8，夹 4–12MB） |
+| ② 卡死 + 上报入口 | 新文件 `data/Watchdog.kt`：主线程 2s tick + 看门狗线程 8s 阈值 + 连续两次才报 + 10 分钟节流；抓 `Looper.getMainLooper().thread.stackTrace` + 最近 12 条 `UiLog`；写 `CrashStore.saveText`（新增，无 Throwable 也能写）并**自动** `CrashReporter.upload`。`App.installCrashLogger` 现在崩溃时也自动上报一次。`MainActivity.onResume/onPause` 调 `Watchdog.setEnabled` |
+| ② 卡死根因 | `onChannelPreview` 的 `epgColumn.render()` 改为**合帧**（`previewEpgRender` + 90ms 可被顶掉）—— 原来挂在每次焦点移动上，长按 ~20 次/秒 → 主线程每秒重建 20 次节目单列 |
+| ③ 内置台标 | `assets/channel_logo` 由 54 张 → **932 张**（`github.com/nid12345/mytv-logos` 全量；打包前统一压到 128px 最长边 + 192 色调色板，25.91MB → 6.50MB）。优先级：内置 → 源自带 `tvg-logo` → CDN → raw → 上游 → gitee（即 `candidates()` 顺序） |
+| ④ 二级菜单长按翻页 | `dispatchKeyEvent` 不再只认 `repeatCount==0`；新增 `crossGroupInFlight` / `crossGroupStartedAt`（1.2s 超时兜底）/ `lastCrossGroupAt` + `CROSS_GROUP_MIN_INTERVAL_MS=320`；`handlePanelEdgeMove` 从「判定到边界」那一行起**恒返回 true**（边界消费按键，绝不跳一级菜单） |
+| ⑤ 订阅源依次回退 | 新增 `sourceChain` / `sourceChainIdx` / `loadSourceChain()` / `nextSourceInChain()` / `LOAD_FAIL_NEXT_SOURCE_MS=1.2s`；`onCreate` 改调 `loadSourceChain()`；全链失败才落 `DEMO_M3U`（调试源）；`loadingAllowsInput(event)` 放行菜单键与已开的弹层 |
+| ⑥ 触屏音量 | 新增 `volumeLevel`（浮点累加器，与 `brightnessLevel` 对称）+ `appliedVolumeStep`（跨档才打 `setStreamVolume`）；`stepVolume` 同步累加器 |
+
+## 关键认知（复用）
+
+1. **`catch (Exception)` 抓不到 `OutOfMemoryError`** —— 它是 `Error`。线上那条崩溃的堆栈末端是
+   `ThreadPoolExecutor.runWorker`，正是后台 loader 线程的异常一路抛到默认 UncaughtExceptionHandler
+   把进程带走了。**凡是"后台线程解码/分配"的代码，兜底必须 catch `Throwable`。**
+2. **远程图片必须"先探边界再采样"**：`BitmapFactory.decodeByteArray(bytes)` 不探边界时，
+   一张 8000px 的 PNG 就是 2 亿字节的分配请求（本次线上实例：218,223,756 字节）。
+3. **LruCache 按张数计量在内容尺寸不可控时是假的**：932 张内置台标让"64 张"的含义完全变了。
+   按 `Bitmap.byteCount` 计字节才能给出确定上限。
+4. **"焦点移动 → 重活"是电视端卡顿的第一嫌疑**：`onFocusChange` 里挂任何 `render()`，
+   乘以长按的 ~20 次/秒重复事件，老设备必死。一律改**合帧/防抖**。
+5. **"边界返回 false" 等于把焦点交给系统**：RecyclerView 末项按下时放行按键，
+   系统会走 `focusSearch(null, FOCUS_DOWN)` → 交给窗口里第一个可聚焦视图 = 一级菜单第 1 项。
+   **凡是"列表到底/到顶"的分支，决定了不消费也要显式 return true。**
+6. **看门狗判 ANR 必须连续两次 + 退后台停判定**：单次长卡顿可能只是 GC/首帧；
+   退后台时主线程被系统挂起属于正常，不停就是每次退后台都误报。
+7. **上报正文要"去变量"**：后台按正文做 SHA-256 指纹聚合，写"阻塞 5123ms"会让同一处卡顿
+   每次都是新指纹 → 列表被刷屏。已改成取整到秒（`阻塞 8s`）。
+
+## 产物（v1.20，versionCode 25）
+
+- `dist/MyTV4.4-v1.20-legacy25.apk`（release，证书 `02e143e8…`）
+- 较 v1.19 **+5.66 MB**（10.39MB → 16.05MB），全部来自内置 932 张台标
+- API 19 验证 PASS：装得上 / 起得来 / 0 FATAL；日志实证
+  「内置台标 932 个」「翡翠台 / CCTV1 / 湖南卫视 全部内置命中」「台标已加载（远程）= 0 条」
+  「订阅源尝试链：共 6 个」「看门狗已启动（阈值 8000ms）」

@@ -83,6 +83,17 @@ object CrashStore {
     fun save(ctx: Context, error: Throwable) {
         val sw = StringWriter()
         error.printStackTrace(PrintWriter(sw))
+        saveText(ctx, sw.toString())
+    }
+
+    /**
+     * 写一条记录（**正文不含头部三行**）。
+     *
+     * v1.20：[Watchdog] 的 ANR 记录没有 `Throwable` 可喂，只能直接给正文，
+     * 所以把"拼头 + 落盘"这一段抽出来共用 —— 头部格式必须只有一处定义，
+     * 否则崩溃与卡顿两条记录的机型/版本行会各自漂移。
+     */
+    fun saveText(ctx: Context, body: String) {
         val head = "机型: ${android.os.Build.MODEL}\n" +
                 "Android: ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})\n" +
                 "版本: ${BuildConfigCompat.VERSION_NAME}\n\n"
@@ -91,7 +102,7 @@ object CrashStore {
             // 补一段缩进空白（写成 `...</string>` 前的 "\n    "），重新读出来时就带上了。
             // 于是"同一段堆栈、进程内读"和"重启后从磁盘读"会得到两个不同的字符串
             // → 指纹不同 → 用户明明关掉过、下次启动又弹（v1.17 实测踩到）。
-            .putString(App.KEY_LAST_CRASH, (head + sw.toString()).trim())
+            .putString(App.KEY_LAST_CRASH, (head + body).trim())
             .remove(App.KEY_CRASH_ACK)      // 新的一条要重新提示（指纹会与旧的"已看过"标记不符）
             // 必须 commit：崩溃路径上进程马上要死，apply 可能写不完
             .commit()

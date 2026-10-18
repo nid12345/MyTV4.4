@@ -27,12 +27,19 @@ import java.util.concurrent.Executors
  *      结果进内存缓存。**这一改动是必需的**：本工程 `bitmapFor()` 由主线程调用
  *      （见 MainActivity 的 renderChannels / selectChannel），同步联网会直接 ANR。
  *
- * 回退顺序（与 1.7 逐级一致）：
- *   1. 内置台标（assets/channel_logo）—— 完全离线、瞬时显示
- *   2. 自建台标仓库 · jsDelivr CDN
- *   3. 自建台标仓库 · raw.githubusercontent 直连
- *   4. 上游台标原站 live.fanmingming.com
- *   5. 上游台标的国内镜像 gitee.com（1.7 的第 5 级，保留）
+ * 回退顺序（v1.20 需求 3，用户原话：「内置 logo 能覆盖的节目的台标优先用系统内置的版本，
+ *   没有的话再用直播源内置的，实在没有再联网加载其他台标 logo 资源」）：
+ *   1. **内置台标**（assets/channel_logo）—— 完全离线、瞬时显示。
+ *      v1.20 起内置的是 **github.com/nid12345/mytv-logos 全量 932 张**（打包前统一压到
+ *      128px 最长边 / 调色板量化，27MB → 6.5MB）。
+ *   2. **直播源自带的 `tvg-logo`** —— 最贴合该源，内置没覆盖到时用它。
+ *   3. 自建台标仓库 · jsDelivr CDN
+ *   4. 自建台标仓库 · raw.githubusercontent 直连
+ *   5. 上游台标原站 live.fanmingming.com
+ *   6. 上游台标的国内镜像 gitee.com（1.7 的第 5 级，保留）
+ *
+ *   ⚠️ 顺序即 [candidates] 的返回顺序，[bitmapFor] 严格按序取；
+ *      第 1 级命中就**不会再下载**后面任何一级。
  *
  * 文件名换算：一律走 M2 移植的 [ChannelName.logoFileName]
  *   —— 它负责 `CCTV-1`→`CCTV1`、`CCTV-5+`→`CCTV5+`、`凤凰香港`→`凤凰卫视香港台`。
@@ -66,6 +73,29 @@ object ChannelLogoStore {
     /** 上游台标的国内镜像。 */
     private const val LOGO_GITEE_MIRROR_PREFIX = "https://gitee.com/sujivin/live/raw/main/tv/"
 
+    // ---------------------------------------------------------------------------
+    // v1.20 需求 1（线上崩溃 f463af208fa2b6af 的修复）：**远程台标不许再 OOM**
+    // ---------------------------------------------------------------------------
+    // 真机堆栈（MiTV4-ANSM0 / Android 6.0.1 / v1.19-legacy.24）：
+    //   java.lang.OutOfMemoryError: Failed to allocate a 218223756 byte allocation
+    //     at android.graphics.BitmapFactory.nativeDecodeByteArray
+    //     at ...ChannelLogoStore.enqueueRemote$lambda$33
+    // 根因三连，缺一不可：
+    //   ① 远程图直接 `BitmapFactory.decodeByteArray(bytes)` —— **不探边界、不算采样**，
+    //      一张 25MB / 8000px 的 PNG 就是 2 亿字节的分配请求；
+    //   ② `catch (ex: Exception)` 抓不到 `OutOfMemoryError`（它是 Error 不是 Exception），
+    //      于是异常从 loader 线程一路抛到默认 UncaughtExceptionHandler → 进程被杀；
+    //   ③ 崩溃前没有任何"内存吃紧就先松手"的动作。
+    // 对策：下载字节数设上限 → 先解边界再算 inSampleSize → 解不动直接放弃这一张 →
+    //       捕获 **Throwable（含 OOM）** → OOM 时立刻清空位图缓存再上报。
+    // ---------------------------------------------------------------------------
+
+    /** 单张远程台标的**下载字节上限**；超过就整张放弃（台标显示尺寸只有 64dp）。 */
+    private const val MAX_LOGO_BYTES = 512 * 1024
+
+    /** 解码后允许的**最大像素数**；超过按 2 的幂降采样。 */
+    private const val MAX_LOGO_PIXELS = 256 * 256
+
     /** 远程候选顺序（内置单独处理，永远排第一）。 */
     private val REMOTE_PREFIXES = listOf(
         LOGO_SELF_CDN_PREFIX,
@@ -88,8 +118,25 @@ object ChannelLogoStore {
     /** 频道名 → 远程候选地址列表 的缓存，避免每次重算。 */
     private val candidateCache = HashMap<String, List<String>>()
 
-    /** 已解码位图缓存：URL 或 "asset://xxx" → Bitmap。 */
-    private val bitmapCache = LruCache<String, Bitmap>(64)
+    /**
+     * 已解码位图缓存：URL 或 "asset://xxx" → Bitmap。
+     *
+     * ⚠️ v1.20 改为**按字节**计量（原来是「按张数」的 `LruCache(64)`）：
+     * 内置台标从 54 张涨到 v1.20 的 932 张（`github.com/nid12345/mytv-logos` 全量内置），
+     * 按张数算完全无法预测实际占多少堆 —— 而老设备（崩溃那台）的可用堆只有几十 MB，
+     * 位图缓存是最容易把它撑爆的一块。按字节算才能给出确定的上限。
+     *
+     * 上限取「进程最大堆的 1/8」，夹在 4MB～12MB 之间：
+     *  · 上限太低 → 滚动时反复解码，卡顿；
+     *  · 上限太高 → 正是这次 OOM 的成因。
+     */
+    private val bitmapCache: LruCache<String, Bitmap> by lazy {
+        val max = Runtime.getRuntime().maxMemory() / 8
+        val bytes = max.coerceIn(4L * 1024 * 1024, 12L * 1024 * 1024).toInt()
+        object : LruCache<String, Bitmap>(bytes) {
+            override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+        }
+    }
 
     /** 正在后台加载中的键，避免同一张图被重复请求。 */
     private val pending = HashSet<String>()
@@ -239,22 +286,110 @@ object ChannelLogoStore {
         return list
     }
 
+    // ---------------- 解码（v1.20：全部走"先探边界再采样"） ----------------
+
+    /**
+     * 按 [MAX_LOGO_PIXELS] 算 2 的幂采样率。
+     *
+     * 只用 2 的幂是 `inSampleSize` 的硬约束（非 2 的幂会被向下取整到最近的 2 的幂），
+     * 所以这里自己循环而不是直接算比值。上限 32 防止极端尺寸下死循环。
+     */
+    private fun sampleSizeFor(w: Int, h: Int): Int {
+        if (w <= 0 || h <= 0) return 1
+        var s = 1
+        while (s < 32 && (w / s) * (h / s) > MAX_LOGO_PIXELS) s = s shl 1
+        return s
+    }
+
+    /**
+     * 解码字节数组：**先只解边界**，算出采样率再真正解码。
+     *
+     * 这是 v1.20 修 OOM 的主防线 —— 老实现是裸的
+     * `BitmapFactory.decodeByteArray(bytes, 0, bytes.size)`，
+     * 一张 8000×6800 的 PNG 会直接申请 2 亿字节。
+     *
+     * @return 位图；解不出 / 解到一半 OOM 都返回 **null**（调用方按"这一级失败"处理）
+     */
+    private fun decodeSampled(bytes: ByteArray): Bitmap? = try {
+        val bounds = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val w = bounds.outWidth
+        val h = bounds.outHeight
+        if (w <= 0 || h <= 0) null
+        else BitmapFactory.decodeByteArray(
+            bytes, 0, bytes.size,
+            BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(w, h) },
+        )
+    } catch (t: Throwable) {
+        // ⚠️ 必须是 Throwable：`OutOfMemoryError` 是 Error，用 Exception 抓不到，
+        // 而它正是线上那条崩溃的类型。抓到后按"这张图放弃"处理，绝不让进程死。
+        onDecodeFailed(t, "远程图 ${bytes.size / 1024}KB")
+        null
+    }
+
+    /** 解码失败（含 OOM）的统一出口：留痕 + 内存吃紧时立刻松手。 */
+    private fun onDecodeFailed(t: Throwable, what: String) {
+        UiLog.w(TAG, "台标解码失败（$what）：${t.javaClass.simpleName}")
+        if (t is OutOfMemoryError) {
+            // 已经 OOM 了就先把位图缓存整份丢掉，给进程留一口气 ——
+            // 否则下一次分配（哪怕只是普通对象）大概率还是 OOM，进程照样死。
+            bitmapCache.evictAll()
+            UiLog.w(TAG, "内存吃紧：已清空台标位图缓存")
+        }
+    }
+
     // ---------------- 加载 ----------------
 
-    /** 从内置 assets 解码（同步、离线、瞬时）。 */
+    /**
+     * 从内置 assets 解码（同步、离线、瞬时）。
+     *
+     * v1.20：同样走采样解码。内置台标虽然已在打包前统一压到 128px 最长边，
+     * 但这里仍防御一次 —— assets 目录是可被外部替换/追加的，不能假设每张都小。
+     */
     fun load(ctx: Context, name: String): Bitmap? {
         val key = "asset://$name"
         bitmapCache.get(key)?.let { return it }
 
         return try {
-            ctx.assets.open("$LOGO_ASSET_DIR/$name.png").use { input ->
-                // decodeStream 失败会返回 null（不是异常），必须判空后再入缓存
-                BitmapFactory.decodeStream(input)?.also { bitmapCache.put(key, it) }
-            }
+            // 一次性读成字节再走 [decodeSampled]：assets 流不可回退，
+            // 「探边界 + 真解」两次解码必须重新开流，读字节反而更省事也更稳。
+            val bytes = ctx.assets.open("$LOGO_ASSET_DIR/$name.png").use { it.readBytes() }
+            decodeSampled(bytes)?.also { bitmapCache.put(key, it) }
         } catch (t: Throwable) {
-            UiLog.d(TAG, "内置台标解码失败：$name（${t.javaClass.simpleName}）")
+            onDecodeFailed(t, "内置 $name")
             null
         }
+    }
+
+    /** 取一张远程台标的字节，**读到 [MAX_LOGO_BYTES] 就放弃**（不下载完整张大图）。 */
+    private fun fetchCapped(url: String): ByteArray {
+        val head = Http.open(url) { resp ->
+            val body = resp.body() ?: return@open ByteArray(0)
+            // 先看声明长度：明显超限的连正文都不读
+            val declared = body.contentLength()
+            if (declared > MAX_LOGO_BYTES) {
+                UiLog.d(TAG, "台标过大（声明 ${declared / 1024}KB）→ 放弃：$url")
+                return@open ByteArray(0)
+            }
+            val buf = ByteArray(8 * 1024)
+            val out = java.io.ByteArrayOutputStream()
+            body.byteStream().use { src ->
+                while (true) {
+                    val n = src.read(buf)
+                    if (n <= 0) break
+                    if (out.size() + n > MAX_LOGO_BYTES) {
+                        // 声明长度不可信（分块传输可能没有 Content-Length）时的兜底
+                        UiLog.d(TAG, "台标过大（实际超过 ${MAX_LOGO_BYTES / 1024}KB）→ 放弃：$url")
+                        return@open ByteArray(0)
+                    }
+                    out.write(buf, 0, n)
+                }
+            }
+            out.toByteArray()
+        }
+        return head
     }
 
     /**
@@ -344,14 +479,15 @@ object ChannelLogoStore {
                         break
                     }
                     val bytes = try {
-                        Http.getBytes(url)
+                        fetchCapped(url)
                     } catch (ex: Exception) {
                         // 逐级回退：这一级失败不报错，直接试下一级（对应原版 error = {} 递归）
                         UiLog.d(TAG, "台标候选失败：$url（${ex.message ?: ex.javaClass.simpleName}）")
                         continue
                     }
-                    // 解码失败（拿到了 HTML 错误页等）也算这一级失败
-                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    if (bytes.isEmpty()) continue          // 超限被放弃 / 空响应 → 也算这一级失败
+                    // 解码失败（拿到了 HTML 错误页等）或 OOM → 都算这一级失败，绝不让进程死
+                    val bitmap = decodeSampled(bytes)
                     if (bitmap == null) {
                         UiLog.d(TAG, "台标候选解码失败：$url（${bytes.size} 字节）")
                         continue
@@ -361,6 +497,11 @@ object ChannelLogoStore {
                     UiLog.i(TAG, "台标已加载（远程）：${ChannelName.logoFileName(channelName)} ← $url")
                     break
                 }
+            } catch (t: Throwable) {
+                // ★ 最后一道网：catch **Throwable**。v1.19 的 `catch (Exception)` 抓不到
+                // OutOfMemoryError，异常从本线程抛到默认 UncaughtExceptionHandler → 进程被杀，
+                // 用户看到的就是"看电视看着看着闪退"。现在最坏情况只是这张台标没加载出来。
+                onDecodeFailed(t, "候选链 $channelName")
             } finally {
                 synchronized(lock) { pending.remove(key) }
                 if (ok) {
