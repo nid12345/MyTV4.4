@@ -57,6 +57,7 @@ import top.yogiczy.mytv.legacy.data.CrashReporter
 import top.yogiczy.mytv.legacy.data.CrashStore
 import top.yogiczy.mytv.legacy.data.IptvSource
 import top.yogiczy.mytv.legacy.data.Prefs
+import top.yogiczy.mytv.legacy.data.SourceLogoPolicy
 import top.yogiczy.mytv.legacy.data.UiTimeShowMode
 import top.yogiczy.mytv.legacy.data.UpdateRepository
 import top.yogiczy.mytv.legacy.net.Http
@@ -5330,6 +5331,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderChannels(group: ChannelGroup) {
         setPanelState(0)
+        // v1.22 需求 2/3：台标策略按**当前订阅源**定（虎牙/斗鱼/YY轮播 → 只用内置；
+        // 潮汕节目回放 → 不显示台标、把位置让给标题）。
+        val logoMode = SourceLogoPolicy.modeOf(Prefs.currentSourceUrl(this))
         val progs = programmesOf(group.channels)   // 判据 3：两行频道项的第二行 = 当前节目
         val rows = ArrayList<ChannelColumnView.Row>(group.channels.size)
         group.channels.forEach { ch ->
@@ -5340,6 +5344,7 @@ class MainActivity : AppCompatActivity() {
                 current = (ch == currentChannel),
                 programme = p?.first,
                 progress = p?.second ?: -1f,
+                logoMode = logoMode,
             ))
         }
         channelColumn.submit(rows)

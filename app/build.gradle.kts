@@ -37,8 +37,8 @@ android {
         // ⚠️ 与 App.kt 的 BuildConfigCompat 必须一致：
         //     versionCode ↔ VERSION_CODE（升级通道用它比大小）
         //     versionName ↔ VERSION_NAME
-        versionCode = 26
-        versionName = "1.21-legacy.26"
+        versionCode = 27
+        versionName = "1.22-legacy.27"
         vectorDrawables { useSupportLibrary = true }
         // minSdk < 21 时 core library desugaring 强制要求 multidex
         multiDexEnabled = true

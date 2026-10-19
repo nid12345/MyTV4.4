@@ -1,8 +1,8 @@
 {
-  "versionCode": 26,
-  "versionName": "1.21-legacy.26",
-  "size": 10193401,
-  "md5": "71551c6dc4c6ee5caab5b7ef92588519",
-  "url": "https://github.com/nid12345/MyTV4.4/releases/download/v1.21/MyTV4.4-v1.21-legacy26.apk",
-  "notes": "v1.21：\n① 修掉「挑节目卡死/闪退」的真凶——节目单匹配原来对每个频道线性扫整份节目单，每次比较都跑好几轮正则归一化，几百个频道 × 上千条节目单 = 千万次正则，老设备主线程直接被压死（线上那条 ANR 就是这么来的，阻塞 11 秒）。现在改成节目单到手时建一次哈希索引，匹配变成查表。\n② 卡死终于能被看见了：新增看门狗（v1.20）之外，崩溃与 ANR 现在都自动上传到 mytvbug.nide.qzz.io，不再需要手动填。\n③ 内置台标瘦身：932 张 → 165 张常见台标（央视全套 + 各省卫视 + 港台常见），APK 从 16.1MB 回到 10.2MB；同时新增 648 条别名索引，「CCTV1综合」「CCTV-1 综合」「中央一台」「湖南卫视高清」这类常见写法都能命中内置台标。\n④ 投屏搜不到小米电视——小米用的是私有设备类型（MiMediaRenderer/MiAVTransport），对 App 原来只发的 MediaRenderer 搜索根本不回应。现在改发 ssdp:all + upnp:rootdevice，并且逐张网卡搜索（网线+WiFi 都试）。\n⑤ 收藏面板不再全表扫描；取「正在播的节目」改用二分查找。"
+  "versionCode": 27,
+  "versionName": "1.22-legacy.27",
+  "size": 10197451,
+  "md5": "7429f47efbd1e7b12d7691478e4af7c0",
+  "url": "https://github.com/nid12345/MyTV4.4/releases/download/v1.22/MyTV4.4-v1.22-legacy27.apk",
+  "notes": "v1.22：\n① 内置源「潮剧」换地址：https://chaoju.nide.qzz.io/chaoju.txt\n   （旧地址 nide.qzz.io/chaoju/chaoju.txt 已不解析；已装的设备会自动迁移，不用手动改）\n② 虎牙 / 斗鱼 / YY轮播 三个源改用**内置**台标，不再联网取主播头像：\n   实测这三个源 1086 条全带 tvg-logo，指向 huyaimg.msstatic.com 等头像地址，\n   每次进分组都要为几百个频道逐个联网拉图。现在只看内置台标，命中不了就留空。\n③ 潮汕节目回放：去掉台标位、把宽度让给标题；标题过长且光标所在行时，\n   标题横向循环跑马灯（匀速滚动，首尾各停一拍读完再回到起点）。"
 }

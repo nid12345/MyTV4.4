@@ -146,10 +146,16 @@ object Prefs {
     private const val K_FAVORITES = "favorites"
 
     /** 当前配置版本，每次需要把新默认值刷到老配置上时 +1。与 `Configs.CURRENT_CONFIG_VERSION` 一致。 */
-    const val CURRENT_CONFIG_VERSION = 7
+    const val CURRENT_CONFIG_VERSION = 8
 
     /** 与 `Constants.LOG_HISTORY_MAX_SIZE` 无关，仅用于内置源展示。 */
     fun defaultSource() = IptvSource("自建源", "https://tvlive.nide.qzz.io")
+
+    /** 内置源「潮剧」的**当前**地址（v1.22 需求 1 起生效）。 */
+    const val CHAOJU_URL = "https://chaoju.nide.qzz.io/chaoju.txt"
+
+    /** 内置源「潮剧」的**旧**地址（域名已不解析，仅用于 v8 迁移时识别）。 */
+    private const val CHAOJU_LEGACY_URL = "https://nide.qzz.io/chaoju/chaoju.txt"
 
     /**
      * 内置默认直播源列表。
@@ -170,7 +176,10 @@ object Prefs {
         // v1.12 需求 1（用户给定地址）：潮剧。
         // 该源为 `名称,#genre#` + `剧目名,url1#url2#url3…` 的 txt 格式，一个剧目带 N 条线路
         // （N 集），因此必须配合 `onPlaybackEnded` 的"同节目内线路顺序连播"一起才完整。
-        IptvSource("潮剧", "https://nide.qzz.io/chaoju/chaoju.txt"),
+        //
+        // v1.22 需求 1：地址由用户更新为独立域名（旧地址 `nide.qzz.io/chaoju/chaoju.txt`
+        // 已不解析，实测 DNS 失败）。**老配置由 v8 迁移改写**，见下方 `savedVersion < 8` 那段。
+        IptvSource("潮剧", CHAOJU_URL),
     )
 
     /**
@@ -709,6 +718,22 @@ object Prefs {
         // 此时一律不动 —— 否则用户手动取消隐藏后，下一次启动又被默认值盖回去，永远关不掉。
         if (savedVersion < 7) {
             applyDefaultHiddenGroups(ctx)
+        }
+
+        // v8（v1.22 需求 1）：内置源「潮剧」换地址。
+        //   旧：https://nide.qzz.io/chaoju/chaoju.txt  （该域名已不解析，实测 DNS 失败）
+        //   新：https://chaoju.nide.qzz.io/chaoju.txt
+        // 老配置里存的是**旧地址**，只改 defaultSources() 对已装过的设备无效
+        // （源列表早在首次启动就落盘了），必须在这里按 url 改写。
+        // ⚠️ 就地改写、保持原顺序：用户在设置里排过的源顺序不能被这次迁移打乱；
+        //    当前正在用的源若正好是旧地址，也要跟着改，否则启动会去加载一个解析不了的域名。
+        if (savedVersion < 8) {
+            val cur = sources(ctx)
+            val migrated = cur.map { src ->
+                if (src.url == CHAOJU_LEGACY_URL) IptvSource(src.name, CHAOJU_URL) else src
+            }
+            if (migrated != cur) saveSources(ctx, migrated)
+            if (currentSourceUrl(ctx) == CHAOJU_LEGACY_URL) setCurrentSource(ctx, CHAOJU_URL)
         }
 
         sp(ctx).edit().putInt("APP_CONFIG_VERSION", CURRENT_CONFIG_VERSION).commit()

@@ -423,6 +423,22 @@ object ChannelLogoStore {
         }
     }
 
+    /**
+     * **只取内置台标**，绝不联网（v1.22 需求 2：虎牙 / 斗鱼 / YY轮播）。
+     *
+     * 这三个源的 `tvg-logo` 全是主播头像（`huyaimg.msstatic.com/avatar/…`），
+     * 用户明确要求"就使用自带的台标 logo 就好"—— 于是这里连源里的 logo 都不看，
+     * 也不进远程回退链（那些地址里根本没有这些频道，只会白等超时）。
+     * 命中不了内置时返回 null → 卡片按"无台标"渲染。
+     */
+    fun builtinBitmapFor(ctx: Context, channelName: String): Bitmap? {
+        if (channelName.isBlank()) return null
+        // 同样受设置页「台标显示」开关管辖：关了就全都不显示
+        if (!top.yogiczy.mytv.legacy.data.Prefs.uiShowChannelLogo(ctx)) return null
+        match(ctx, channelName)?.let { builtin -> return load(ctx, builtin) }
+        return null
+    }
+
     /** 取一张远程台标的字节，**读到 [MAX_LOGO_BYTES] 就放弃**（不下载完整张大图）。 */
     private fun fetchCapped(url: String): ByteArray {
         val head = Http.open(url) { resp ->

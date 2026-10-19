@@ -8,6 +8,7 @@ import android.view.ViewGroup
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import top.yogiczy.mytv.legacy.data.Channel
+import top.yogiczy.mytv.legacy.data.SourceLogoPolicy
 import top.yogiczy.mytv.legacy.core.FocusEngine
 import top.yogiczy.mytv.legacy.core.UiLog
 import top.yogiczy.mytv.legacy.ui.ChannelCardView
@@ -34,6 +35,7 @@ class ChannelColumnView(context: Context) : RecyclerView(context) {
         /**
          * @param programme 当前正在播出的节目名（对齐 1.7 `ChannelCard` 的第二行）
          * @param progress  该节目进度 0f..1f；< 0 = 不显示行底进度条
+         * @param logoMode 台标策略（v1.22 需求 2/3，见 [top.yogiczy.mytv.legacy.data.SourceLogoPolicy]）
          */
         data class ChannelRow(
             val channel: Channel,
@@ -41,6 +43,7 @@ class ChannelColumnView(context: Context) : RecyclerView(context) {
             val current: Boolean = false,
             val programme: String? = null,
             val progress: Float = -1f,
+            val logoMode: SourceLogoPolicy.Mode = SourceLogoPolicy.Mode.DEFAULT,
         ) : Row()
 
         data class TextRow(
@@ -325,16 +328,26 @@ class ChannelColumnView(context: Context) : RecyclerView(context) {
                 // `keyOfView` 里匹配不到任何子项 → 静默走 `focusFirstIn()` 落到第 1 项，
                 // 但仍返回 true —— 表现为"日志说回到上次频道、画面却停在第 1 项"。
                 FocusEngine.bind(card, row.channel.name)
+                // v1.22 需求 2：虎牙 / 斗鱼 / YY轮播 只用内置台标 —— 不把源里的
+                // 主播头像（tvg-logo）喂进去，也绝不为它们联网取图。
+                val logoBitmap = when (row.logoMode) {
+                    SourceLogoPolicy.Mode.BUILTIN_ONLY ->
+                        ChannelLogoStore.builtinBitmapFor(context, row.channel.name)
+                    else ->
+                        // 问题 5：**优先用直播源自带的 tvg-logo**（1.7 的解析器一定会给每个频道
+                        // 一个 logo：`tvg-logo` 缺失时回落成台标仓库地址）。本工程此前只看频道名，
+                        // 于是"换到带 tvg-logo 的订阅源"反而看不到台标。
+                        ChannelLogoStore.bitmapFor(context, row.channel.name, row.channel.logo)
+                }
                 card.bind(
                     row.channel,
                     row.badge,
                     row.current,
-                    // 问题 5：**优先用直播源自带的 tvg-logo**（1.7 的解析器一定会给每个频道
-                    // 一个 logo：`tvg-logo` 缺失时回落成台标仓库地址）。本工程此前只看频道名，
-                    // 于是"换到带 tvg-logo 的订阅源"反而看不到台标。
-                    ChannelLogoStore.bitmapFor(context, row.channel.name, row.channel.logo),
+                    logoBitmap,
                     row.programme,
                     row.progress,
+                    // v1.22 需求 3：潮汕节目回放去掉台标位，把宽度让给标题
+                    showLogo = row.logoMode != SourceLogoPolicy.Mode.NONE,
                 )
                 boundName = row.channel.name
                 boundCards.getOrPut(row.channel.name) { ArrayList(1) }.add(card)

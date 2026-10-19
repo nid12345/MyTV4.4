@@ -2544,3 +2544,44 @@ Cloudflare Worker / 默认隐藏四个分组。
 - 较 v1.20 **−5.86 MB**（16.05MB → 10.19MB），全部来自内置台标瘦身
 - 新增 `app/src/test/java/top/yogiczy/mytv/legacy/EpgMatchTest.kt`（3 项测试全过）
 - 新增资产 `app/src/main/assets/logo_alias.txt`（648 条，13KB）
+
+---
+
+# v1.22（versionCode 27 / `1.22-legacy.27`，2026-10-19）
+
+三组需求：潮剧源换地址 / 虎牙·斗鱼·YY轮播改用内置台标 / 潮汕回放去台标位+标题跑马灯。
+
+## 实现要点（签名级）
+
+| 需求 | 入口 |
+|---|---|
+| ① 潮剧换地址 | `Prefs.defaultSources()` → `https://chaoju.nide.qzz.io/chaoju.txt`（新增常量 `CHAOJU_URL`）；`CURRENT_CONFIG_VERSION` 7→8，新增 v8 迁移：按 url 把旧地址（`CHAOJU_LEGACY_URL`，域名已不解析）就地改写、保持源顺序，当前源若是旧地址一并跟改 |
+| ② 三源改内置台标 | 新文件 `data/SourceLogoPolicy.kt`：`Mode{DEFAULT/BUILTIN_ONLY/NONE}` + `modeOf(url)`（**只匹配 URL 路径部分**，剥掉协议/主机/端口/query）；`ChannelLogoStore.builtinBitmapFor()`（只查内置、不联网、不看 tvg-logo）；`ChannelColumnView.Row.ChannelRow.logoMode` + VH.bind 按模式选图 |
+| ③ 去台标位+跑马灯 | `ChannelCardView.bind(..., showLogo)`：false 时 logo 置 **GONE**（不是 INVISIBLE，后者仍占 64dp+8dp）；`setLogo` 加 `logoAllowed` 守卫（远程图晚到也不显示）。跑马灯自实现：`updateMarquee/startMarquee/stopMarquee` + `MarqueeInterpolator`，26dp/s 匀速、首尾各停 900ms、INFINITE/RESTART；失焦/换绑/文字变短即取消并归零 `translationX`。曲线数学提纯为 `ChannelCardView.marqueeFraction` |
+
+## 关键认知（复用）
+
+1. **只改 `defaultSources()` 对已装设备无效**：源列表首次启动就落盘。改内置源地址必须
+   同时做「配置版本 +1 并在迁移里按 url 改写」，且要**保持用户排的源顺序**、把当前源一起改。
+2. **「不显示台标」与「没有台标图」是两回事**：前者要 `GONE`（释放布局宽度），
+   后者 `INVISIBLE` 就够。混用会让"让位给标题"的需求看起来没生效。
+3. **TextView 自带的 `ellipsize=marquee` 起不来**：它只在 **TextView 自身获得焦点**时启动，
+   而列表项的焦点在整张卡片上、TextView 是子视图 → 只能自己用 ValueAnimator 做。
+4. **跑马灯必须能干净收场**：失焦/换绑/文字变短都要 cancel + `translationX=0`，
+   否则 RecyclerView 复用会让下一行带着上一行的偏移渲染（典型的"错位"bug）。
+5. **按 URL 匹配源特征时，要剥掉协议/主机/端口/query 再匹配**：写成
+   `sub.ottiptv.cc/huyayqk` 这种连续子串，带 `:8080` 或 `?query` 的地址就会匹配失败
+   （单测 `SourceLogoPolicyTest` 抓到的）。匹配路径部分最稳。
+6. **用 URL 而不是源名做判据**：源名允许用户在设置里改，URL 不变。
+7. **判"是否命中内置台标"不要走模糊匹配**：继续用 v1.21 的「文件名直查 → 别名索引 → cctv 核心」三级。
+8. **纯数学要能从 UI 类里拆出来**：`marqueeFragment`/`marqueeFraction` 提成 companion 纯函数后，
+   JVM 单测不引 Robolectric 也能锁住曲线行为（端点/停顿/匀速/NaN）。
+
+## 产物（v1.22，versionCode 27）
+
+- `dist/MyTV4.4-v1.22-legacy27.apk`（release，10,197,451 B，MD5 `7429f47efbd1e7b12d7691478e4af7c0`）
+- 新增 `app/src/test/java/.../MarqueeCurveTest.kt`（5 项）、`SourceLogoPolicyTest.kt`（3 项）
+  —— 连同 v1.21 的 `EpgMatchTest`（3 项）共 **11 项 JVM 单测**
+- 新增 `data/SourceLogoPolicy.kt`
+- ⚠️ 已知验证缺口：切到虎牙源/潮汕源的定向验证因模拟器被系统杀掉而未跑完，
+  这三项（三源不联网取头像、潮汕无台标位、跑马灯）仅有单测+代码路径层面证据
